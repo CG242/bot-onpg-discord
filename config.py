@@ -23,8 +23,11 @@ ADMIN_ROLE_ID = int(os.getenv("ADMIN_ROLE_ID", "0") or "0")
 FT_TYPES = (2, 3, 5, 7, 10)
 ACTIVE_DAYS = int(os.getenv("ACTIVE_DAYS", "14"))
 AUTO_SYNC_SECONDS = int(os.getenv("AUTO_SYNC_SECONDS", "180"))
+
+# Hiérarchie révisée (Phase 1 Tâche 4)
 VALID_REGIONS = ("BZ", "PN")
-VALID_TIERS = ("S+", "S", "A+", "A", "B+", "B", "NR")
+VALID_TIERS = ("S+", "S", "A+", "A", "B+", "B", "C", "NR")
+
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 LOG_TO_FILE = os.getenv("LOG_TO_FILE", "false").lower() in ("1", "true", "yes")
 LOG_FILE = os.getenv("LOG_FILE", "bot.log")

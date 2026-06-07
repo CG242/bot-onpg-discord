@@ -57,6 +57,7 @@ class Database:
         return bool(row and row[0] > 0)
 
     def _migrate_schema(self, cursor) -> None:
+        # Migrations pour colonnes players
         if not self._column_exists(cursor, "matches", "match_index"):
             cursor.execute(
                 "ALTER TABLE matches ADD COLUMN match_index INT NOT NULL DEFAULT 0"
@@ -99,6 +100,48 @@ class Database:
                 "ALTER TABLE players ADD COLUMN rank_manual TINYINT(1) NOT NULL DEFAULT 0"
             )
             logger.info("Migration: colonne rank_manual ajoutée")
+        
+        # Migrations pour colonnes seasons (Phase 1 Tâche 2)
+        if not self._column_exists(cursor, "seasons", "end_date"):
+            cursor.execute(
+                "ALTER TABLE seasons ADD COLUMN end_date DATE NULL DEFAULT NULL"
+            )
+            logger.info("Migration: colonne end_date ajoutée à seasons")
+        
+        if not self._column_exists(cursor, "seasons", "champion_id"):
+            cursor.execute(
+                "ALTER TABLE seasons ADD COLUMN champion_id INT NULL DEFAULT NULL"
+            )
+            logger.info("Migration: colonne champion_id ajoutée à seasons")
+        
+        if not self._column_exists(cursor, "seasons", "updated_at"):
+            cursor.execute(
+                "ALTER TABLE seasons ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"
+            )
+            logger.info("Migration: colonne updated_at ajoutée à seasons")
+        
+        # Table de déduplication (Phase 1 Tâche 3)
+        if not self._column_exists(cursor, "seasons", "id"):
+            # Si seasons table n'existe pas, elle sera créée dans init_schema
+            pass
+        else:
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS deduplication_history (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    source_player_id INT NOT NULL,
+                    target_player_id INT NOT NULL,
+                    source_player_name VARCHAR(255) NOT NULL,
+                    target_player_name VARCHAR(255) NOT NULL,
+                    merged_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    merged_by VARCHAR(255) NULL,
+                    notes TEXT NULL,
+                    FOREIGN KEY (source_player_id) REFERENCES players(id),
+                    FOREIGN KEY (target_player_id) REFERENCES players(id)
+                )
+                """
+            )
+            logger.info("Migration: table deduplication_history créée/vérifiée")
 
     def init_schema(self) -> None:
         try:
@@ -274,6 +317,195 @@ class Database:
 
     def reset_season(self, name: str, start_date) -> int:
         return self.create_season(name, start_date)
+
+    # ========================================================================
+    # GESTION DES SAISONS (Phase 1 Tâche 2)
+    # ========================================================================
+
+    def get_season_by_id(self, season_id: int) -> dict[str, Any] | None:
+        """Récupère une saison par son ID."""
+        with self._session(dictionary=True) as (_, cursor):
+            cursor.execute(
+                "SELECT * FROM seasons WHERE id = %s",
+                (season_id,),
+            )
+            return cursor.fetchone()
+
+    def get_all_seasons(self) -> list[dict[str, Any]]:
+        """Récupère toutes les saisons (actives et archivées)."""
+        with self._session(dictionary=True) as (_, cursor):
+            cursor.execute(
+                "SELECT * FROM seasons ORDER BY id DESC"
+            )
+            return cursor.fetchall()
+
+    def close_season(
+        self,
+        season_id: int,
+        champion_id: int | None = None,
+    ) -> None:
+        """
+        Archive une saison (marque comme complète).
+        
+        Détermine automatiquement le champion si non spécifié.
+        
+        Args:
+            season_id: ID de la saison à archiver
+            champion_id: ID du champion (optionnel)
+        """
+        # Détermine le champion = leader du classement
+        if champion_id is None:
+            leaderboard = self.get_leaderboard(season_id, active_only=False)
+            if leaderboard:
+                champion_id = leaderboard[0]["id"]
+        
+        with self._session() as (_, cursor):
+            cursor.execute(
+                """
+                UPDATE seasons
+                SET is_active = 0, end_date = CURDATE(), champion_id = %s, updated_at = NOW()
+                WHERE id = %s
+                """,
+                (champion_id, season_id),
+            )
+            logger.info(
+                "Saison %s archivée (champion_id=%s)",
+                season_id,
+                champion_id,
+            )
+
+    # ========================================================================
+    # DÉDUPLICATION & FUSION DE JOUEURS (Phase 1 Tâche 3)
+    # ========================================================================
+
+    def get_all_players(self) -> list[dict[str, Any]]:
+        """Récupère tous les joueurs (pour déduplication)."""
+        with self._session(dictionary=True) as (_, cursor):
+            cursor.execute(
+                "SELECT * FROM players ORDER BY normalized_name ASC"
+            )
+            return cursor.fetchall()
+
+    def merge_players(
+        self,
+        source_id: int,
+        target_id: int,
+        merged_by: str | None = None,
+    ) -> bool:
+        """
+        Fusionne deux profils joueurs.
+        
+        Transfert tous les matches et données du joueur source vers target.
+        Supprime le joueur source après fusion.
+        
+        Args:
+            source_id: ID du joueur à fusionner (sera supprimé)
+            target_id: ID du joueur cible (conservé)
+            merged_by: Nom de l'utilisateur qui a effectué la fusion
+        
+        Returns:
+            True si fusion réussie
+        """
+        try:
+            with self._session(dictionary=True) as (conn, cursor):
+                # Récupère les infos avant fusion
+                cursor.execute(
+                    "SELECT name FROM players WHERE id = %s",
+                    (source_id,),
+                )
+                source_row = cursor.fetchone()
+                if not source_row:
+                    logger.warning("Joueur source %s introuvable", source_id)
+                    return False
+                
+                source_name = source_row.get("name", "Inconnu")
+                
+                cursor.execute(
+                    "SELECT name FROM players WHERE id = %s",
+                    (target_id,),
+                )
+                target_row = cursor.fetchone()
+                if not target_row:
+                    logger.warning("Joueur cible %s introuvable", target_id)
+                    return False
+                
+                target_name = target_row.get("name", "Inconnu")
+                
+                # Transfère les matches du joueur source
+                cursor.execute(
+                    """
+                    UPDATE matches SET player1_id = %s WHERE player1_id = %s
+                    """,
+                    (target_id, source_id),
+                )
+                p1_count = cursor.rowcount
+                
+                cursor.execute(
+                    """
+                    UPDATE matches SET player2_id = %s WHERE player2_id = %s
+                    """,
+                    (target_id, source_id),
+                )
+                p2_count = cursor.rowcount
+                
+                cursor.execute(
+                    """
+                    UPDATE matches SET winner_id = %s WHERE winner_id = %s
+                    """,
+                    (target_id, source_id),
+                )
+                winner_count = cursor.rowcount
+                
+                # Enregistre la déduplication
+                cursor.execute(
+                    """
+                    INSERT INTO deduplication_history
+                    (source_player_id, target_player_id, source_player_name, target_player_name, merged_by)
+                    VALUES (%s, %s, %s, %s, %s)
+                    """,
+                    (source_id, target_id, source_name, target_name, merged_by or "admin"),
+                )
+                
+                # Supprime le joueur source
+                cursor.execute(
+                    "DELETE FROM players WHERE id = %s",
+                    (source_id,),
+                )
+                
+                conn.commit()
+                logger.info(
+                    "Fusion réussie: %s (id=%s) → %s (id=%s). Matches transférés: %d",
+                    source_name,
+                    source_id,
+                    target_name,
+                    target_id,
+                    p1_count + p2_count + winner_count,
+                )
+                return True
+        except Error as exc:
+            logger.exception(
+                "Erreur lors de la fusion de %s vers %s: %s",
+                source_id,
+                target_id,
+                exc,
+            )
+            return False
+
+    def get_deduplication_history(
+        self,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Récupère l'historique des fusions."""
+        with self._session(dictionary=True) as (_, cursor):
+            cursor.execute(
+                """
+                SELECT * FROM deduplication_history
+                ORDER BY merged_at DESC
+                LIMIT %s
+                """,
+                (limit,),
+            )
+            return cursor.fetchall()
 
     def count_matches_by_message(self, message_id: int) -> int:
         with self._session() as (_, cursor):

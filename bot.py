@@ -8,6 +8,7 @@ from discord.ext import commands
 
 import config
 from commands import setup_commands
+from admin_commands import setup_admin_commands
 from database import Database
 from parser import normalize_name, parse_all_matches
 from stats import format_live_leaderboard_blocks
@@ -75,6 +76,7 @@ class FTBot(commands.Bot):
 
     async def setup_hook(self) -> None:
         setup_commands(self.tree, self.db)
+        setup_admin_commands(self.tree, self.db)  # Phase 2: Commandes admin
         if config.GUILD_ID:
             guild = discord.Object(id=config.GUILD_ID)
             self.tree.copy_global_to(guild=guild)

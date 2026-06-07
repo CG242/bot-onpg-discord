@@ -20,9 +20,85 @@ def _region_label(region: str | None) -> str:
     return region.upper() if region else "—"
 
 
-
 def _match_result_label(won: bool) -> str:
     return "Gagné" if won else "Perdu"
+
+
+# ============================================================================
+# PHASE 3 TÂCHE 9: NOUVEAU SYSTÈME DE SCORING
+# ============================================================================
+
+def calculate_player_score(
+    elo: int,
+    wins: int,
+    losses: int,
+    last_match_at: datetime | None,
+) -> int:
+    """
+    Calcule le score composite du joueur selon la formule Phase 3 Tâche 9.
+    
+    Formule: Score = (ELO × 0.5) + (taux % × 0.3) + (bonus_activité × 0.15) + (matchs × 0.05)
+    
+    Où:
+    - ELO : Points ELO actuels (poids 50%)
+    - taux % : Taux de victoire en % (poids 30%)
+    - bonus_activité : Points bonus selon récence (poids 15%)
+      * <7j : +50
+      * <14j : +25
+      * <30j : +10
+      * ≥30j : +0
+    - matchs : Nombre de matchs joués (poids 5%)
+    
+    Args:
+        elo: Points ELO
+        wins: Nombre de victoires
+        losses: Nombre de défaites
+        last_match_at: Date du dernier match
+    
+    Returns:
+        Score composite arrondi
+    """
+    # Composante 1 : ELO (poids 50%)
+    elo_component = elo * 0.5
+    
+    # Composante 2 : Taux de victoire (poids 30%)
+    total_matches = wins + losses
+    if total_matches > 0:
+        win_percentage = (wins / total_matches) * 100
+        win_component = win_percentage * 0.3
+    else:
+        win_component = 0.0
+    
+    # Composante 3 : Bonus activité (poids 15%)
+    activity_bonus = 0.0
+    if last_match_at:
+        now = datetime.now(timezone.utc)
+        if isinstance(last_match_at, str):
+            try:
+                last_match_at = datetime.fromisoformat(last_match_at)
+                if last_match_at.tzinfo is None:
+                    last_match_at = last_match_at.replace(tzinfo=timezone.utc)
+            except (ValueError, TypeError):
+                last_match_at = None
+        
+        if last_match_at:
+            days_since = (now - last_match_at).days
+            if days_since < 7:
+                activity_bonus = 50.0
+            elif days_since < 14:
+                activity_bonus = 25.0
+            elif days_since < 30:
+                activity_bonus = 10.0
+    
+    activity_component = activity_bonus * 0.15
+    
+    # Composante 4 : Nombre de matchs (poids 5%)
+    match_component = total_matches * 0.05
+    
+    # Score total
+    total_score = elo_component + win_component + activity_component + match_component
+    
+    return int(round(total_score))
 
 
 def format_leaderboard(
@@ -33,7 +109,14 @@ def format_leaderboard(
     title: str = "CLASSEMENT OFFICIEL",
     date_debut=None,
     date_fin=None,
+    use_new_scoring: bool = False,
 ) -> str:
+    """
+    Formate le classement avec tri intelligentoptionnel nouveau scoring.
+    
+    Args:
+        use_new_scoring: Si True, utilise la formule composée Phase 3 Tâche 9
+    """
     debut = date_debut if date_debut else config.START_DATE
     display_fin = date_fin if date_fin else datetime.now(timezone.utc)
 
@@ -45,6 +128,18 @@ def format_leaderboard(
         date_fin=date_fin,
     )
 
+    # Calcule les scores si nouveau système activé
+    if use_new_scoring and rows:
+        for row in rows:
+            row["score"] = calculate_player_score(
+                row.get("elo", 0),
+                row.get("ft_wins", 0),
+                row.get("ft_losses", 0),
+                row.get("last_match_at"),
+            )
+        # Trie par score DESC
+        rows.sort(key=lambda r: r.get("score", 0), reverse=True)
+
     lines = [
         f"**{title}**",
         "",
@@ -52,7 +147,10 @@ def format_leaderboard(
     ]
     if region:
         lines.append(f"Région : {region}")
-    lines.append("Basé sur les confrontations enregistrées")
+    if use_new_scoring:
+        lines.append("Tri par score composite (ELO + activité + résultats)")
+    else:
+        lines.append("Basé sur les confrontations enregistrées")
     lines.append("")
 
     if not rows:
@@ -67,15 +165,24 @@ def format_leaderboard(
         wins = int(row["ft_wins"] or 0)
         losses = int(row["ft_losses"] or 0)
         ratio = win_ratio(wins, losses)
-
-        lines.append(f"**TOP {pos} — {name}**")
-        lines.append(f"Rang : {tier}")
-        if not region:
-            lines.append(f"Région : {reg}")
-        lines.append(f"Points : {points}")
-        lines.append(f"FT gagnés : {wins}")
-        lines.append(f"Défaites : {losses}")
-        lines.append(f"Ratio : {ratio:.0f}%")
+        
+        if use_new_scoring:
+            score = row.get("score", 0)
+            lines.append(f"**TOP {pos} — {name}**")
+            lines.append(f"Score : {score} | ELO : {points}")
+            lines.append(f"Rang : {tier}")
+            if not region:
+                lines.append(f"Région : {reg}")
+            lines.append(f"Ratio : {ratio:.0f}% ({wins}V-{losses}D)")
+        else:
+            lines.append(f"**TOP {pos} — {name}**")
+            lines.append(f"Rang : {tier}")
+            if not region:
+                lines.append(f"Région : {reg}")
+            lines.append(f"Points : {points}")
+            lines.append(f"FT gagnés : {wins}")
+            lines.append(f"Défaites : {losses}")
+            lines.append(f"Ratio : {ratio:.0f}%")
         lines.append("")
 
     lines.append(f"{len(rows)} joueur(s) classés")
