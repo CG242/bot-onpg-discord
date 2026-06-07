@@ -6,7 +6,6 @@ load_dotenv()
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "")
 MYSQL_HOST = os.getenv("MYSQL_HOST", "localhost")
-MYSQL_PORT = int(os.getenv("MYSQL_PORT", "3306"))
 MYSQL_USER = os.getenv("MYSQL_USER", "root")
 MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
 MYSQL_DATABASE = os.getenv("MYSQL_DATABASE", "ft_championship")
@@ -23,14 +22,11 @@ ADMIN_ROLE_ID = int(os.getenv("ADMIN_ROLE_ID", "0") or "0")
 FT_TYPES = (2, 3, 5, 7, 10)
 ACTIVE_DAYS = int(os.getenv("ACTIVE_DAYS", "14"))
 AUTO_SYNC_SECONDS = int(os.getenv("AUTO_SYNC_SECONDS", "180"))
-
-# Hiérarchie révisée (Phase 1 Tâche 4)
 VALID_REGIONS = ("BZ", "PN")
-VALID_TIERS = ("S+", "S", "A+", "A", "B+", "B", "C", "NR")
-
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-LOG_TO_FILE = os.getenv("LOG_TO_FILE", "false").lower() in ("1", "true", "yes")
-LOG_FILE = os.getenv("LOG_FILE", "bot.log")
+VALID_TIERS = ("S+", "S", "A+", "A", "B+", "B", "NR")
+LOG_FILE = "bot.log"
+BACKUP_DIR = os.getenv("BACKUP_DIR", "backups")
+SIMILARITY_THRESHOLD = float(os.getenv("SIMILARITY_THRESHOLD", "0.88"))
 
 
 def score_channels() -> list[tuple[str | None, str]]:

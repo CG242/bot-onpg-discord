@@ -1,5 +1,8 @@
+import json
 import logging
 from contextlib import contextmanager
+from datetime import date, datetime
+from pathlib import Path
 from typing import Any
 
 import mysql.connector
@@ -7,11 +10,13 @@ from mysql.connector import Error
 
 import config
 from parser import (
-    format_display_name,
     is_valid_player_name,
+    normalize_key,
     normalize_name,
+    pick_display_name,
     sanitize_player_name,
 )
+from ranking import base_elo_for_player, compute_match_elo_changes, elo_for_tier
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +25,6 @@ class Database:
     def __init__(self) -> None:
         self._config = {
             "host": config.MYSQL_HOST,
-            "port": config.MYSQL_PORT,
             "user": config.MYSQL_USER,
             "password": config.MYSQL_PASSWORD,
             "database": config.MYSQL_DATABASE,
@@ -57,7 +61,6 @@ class Database:
         return bool(row and row[0] > 0)
 
     def _migrate_schema(self, cursor) -> None:
-        # Migrations pour colonnes players
         if not self._column_exists(cursor, "matches", "match_index"):
             cursor.execute(
                 "ALTER TABLE matches ADD COLUMN match_index INT NOT NULL DEFAULT 0"
@@ -100,48 +103,28 @@ class Database:
                 "ALTER TABLE players ADD COLUMN rank_manual TINYINT(1) NOT NULL DEFAULT 0"
             )
             logger.info("Migration: colonne rank_manual ajoutée")
-        
-        # Migrations pour colonnes seasons (Phase 1 Tâche 2)
+
         if not self._column_exists(cursor, "seasons", "end_date"):
+            cursor.execute("ALTER TABLE seasons ADD COLUMN end_date DATE NULL")
+            logger.info("Migration: colonne end_date ajoutée")
+
+        if not self._column_exists(cursor, "seasons", "status"):
             cursor.execute(
-                "ALTER TABLE seasons ADD COLUMN end_date DATE NULL DEFAULT NULL"
+                "ALTER TABLE seasons ADD COLUMN status VARCHAR(16) NOT NULL DEFAULT 'active'"
             )
-            logger.info("Migration: colonne end_date ajoutée à seasons")
-        
-        if not self._column_exists(cursor, "seasons", "champion_id"):
+            logger.info("Migration: colonne status ajoutée")
             cursor.execute(
-                "ALTER TABLE seasons ADD COLUMN champion_id INT NULL DEFAULT NULL"
+                "UPDATE seasons SET status = 'archived' WHERE is_active = 0"
             )
-            logger.info("Migration: colonne champion_id ajoutée à seasons")
-        
-        if not self._column_exists(cursor, "seasons", "updated_at"):
             cursor.execute(
-                "ALTER TABLE seasons ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"
+                "UPDATE seasons SET status = 'active' WHERE is_active = 1"
             )
-            logger.info("Migration: colonne updated_at ajoutée à seasons")
-        
-        # Table de déduplication (Phase 1 Tâche 3)
-        if not self._column_exists(cursor, "seasons", "id"):
-            # Si seasons table n'existe pas, elle sera créée dans init_schema
-            pass
-        else:
+
+        if not self._column_exists(cursor, "seasons", "data_reset_at"):
             cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS deduplication_history (
-                    id INT AUTO_INCREMENT PRIMARY KEY,
-                    source_player_id INT NOT NULL,
-                    target_player_id INT NOT NULL,
-                    source_player_name VARCHAR(255) NOT NULL,
-                    target_player_name VARCHAR(255) NOT NULL,
-                    merged_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    merged_by VARCHAR(255) NULL,
-                    notes TEXT NULL,
-                    FOREIGN KEY (source_player_id) REFERENCES players(id),
-                    FOREIGN KEY (target_player_id) REFERENCES players(id)
-                )
-                """
+                "ALTER TABLE seasons ADD COLUMN data_reset_at DATETIME NULL"
             )
-            logger.info("Migration: table deduplication_history créée/vérifiée")
+            logger.info("Migration: colonne data_reset_at ajoutée")
 
     def init_schema(self) -> None:
         try:
@@ -209,6 +192,7 @@ class Database:
 
             self.cleanup_corrupt_players()
             self._migrate_old_tiers()
+            self.deduplicate_all_players()
         except Error as exc:
             logger.exception("Erreur init_schema: %s", exc)
             raise
@@ -217,9 +201,10 @@ class Database:
         return is_valid_player_name(player.get("name", ""))
 
     def player_display_name(self, player: dict[str, Any]) -> str:
-        if self._is_valid_player(player):
-            return player["name"].strip()
-        return format_display_name(player.get("normalized_name", ""), player.get("name", ""))
+        name = (player.get("name") or "").strip()
+        if name:
+            return name
+        return "Inconnu"
 
     def _migrate_old_tiers(self) -> None:
         placeholders = ", ".join(["%s"] * len(config.VALID_TIERS))
@@ -302,210 +287,145 @@ class Database:
     def get_active_season(self) -> dict[str, Any] | None:
         with self._session(dictionary=True) as (_, cursor):
             cursor.execute(
-                "SELECT * FROM seasons WHERE is_active = 1 ORDER BY id DESC LIMIT 1"
+                """
+                SELECT * FROM seasons
+                WHERE status = 'active' OR is_active = 1
+                ORDER BY id DESC LIMIT 1
+                """
             )
             return cursor.fetchone()
 
-    def create_season(self, name: str, start_date) -> int:
-        with self._session() as (_, cursor):
-            cursor.execute("UPDATE seasons SET is_active = 0 WHERE is_active = 1")
-            cursor.execute(
-                "INSERT INTO seasons (name, start_date, is_active) VALUES (%s, %s, 1)",
-                (name, start_date),
+    def get_season_score_cutoff(self, season: dict[str, Any] | None):
+        """Date/heure minimum pour importer un message Discord dans la saison."""
+        from datetime import timezone as tz
+
+        if not season:
+            return config.START_DATE
+
+        start = season.get("start_date") or config.START_DATE.date()
+        if isinstance(start, datetime):
+            start_dt = start if start.tzinfo else start.replace(tzinfo=tz.utc)
+        else:
+            start_dt = datetime.combine(start, datetime.min.time()).replace(
+                tzinfo=tz.utc
             )
-            return cursor.lastrowid
 
-    def reset_season(self, name: str, start_date) -> int:
-        return self.create_season(name, start_date)
+        reset_at = season.get("data_reset_at")
+        if reset_at:
+            if isinstance(reset_at, datetime):
+                reset_dt = (
+                    reset_at if reset_at.tzinfo else reset_at.replace(tzinfo=tz.utc)
+                )
+            else:
+                reset_dt = datetime.combine(reset_at, datetime.min.time()).replace(
+                    tzinfo=tz.utc
+                )
+            if reset_dt > start_dt:
+                return reset_dt
+        return start_dt
 
-    # ========================================================================
-    # GESTION DES SAISONS (Phase 1 Tâche 2)
-    # ========================================================================
-
-    def get_season_by_id(self, season_id: int) -> dict[str, Any] | None:
-        """Récupère une saison par son ID."""
+    def get_season(self, season_id: int) -> dict[str, Any] | None:
         with self._session(dictionary=True) as (_, cursor):
-            cursor.execute(
-                "SELECT * FROM seasons WHERE id = %s",
-                (season_id,),
-            )
+            cursor.execute("SELECT * FROM seasons WHERE id = %s", (season_id,))
             return cursor.fetchone()
 
-    def get_all_seasons(self) -> list[dict[str, Any]]:
-        """Récupère toutes les saisons (actives et archivées)."""
+    def list_archived_seasons(self) -> list[dict[str, Any]]:
         with self._session(dictionary=True) as (_, cursor):
             cursor.execute(
-                "SELECT * FROM seasons ORDER BY id DESC"
+                """
+                SELECT * FROM seasons
+                WHERE status = 'archived' OR is_active = 0
+                ORDER BY id DESC
+                """
             )
             return cursor.fetchall()
 
-    def close_season(
-        self,
-        season_id: int,
-        champion_id: int | None = None,
-    ) -> None:
-        """
-        Archive une saison (marque comme complète).
-        
-        Détermine automatiquement le champion si non spécifié.
-        
-        Args:
-            season_id: ID de la saison à archiver
-            champion_id: ID du champion (optionnel)
-        """
-        # Détermine le champion = leader du classement
-        if champion_id is None:
-            leaderboard = self.get_leaderboard(season_id, active_only=False)
-            if leaderboard:
-                champion_id = leaderboard[0]["id"]
-        
+    def archive_active_season(self, end_date: date | None = None) -> dict[str, Any] | None:
+        active = self.get_active_season()
+        if not active:
+            return None
+        end = end_date or date.today()
         with self._session() as (_, cursor):
             cursor.execute(
                 """
                 UPDATE seasons
-                SET is_active = 0, end_date = CURDATE(), champion_id = %s, updated_at = NOW()
+                SET is_active = 0, status = 'archived', end_date = %s
                 WHERE id = %s
                 """,
-                (champion_id, season_id),
+                (end, active["id"]),
             )
-            logger.info(
-                "Saison %s archivée (champion_id=%s)",
-                season_id,
-                champion_id,
-            )
+        active["status"] = "archived"
+        active["end_date"] = end
+        active["is_active"] = 0
+        return active
 
-    # ========================================================================
-    # DÉDUPLICATION & FUSION DE JOUEURS (Phase 1 Tâche 3)
-    # ========================================================================
-
-    def get_all_players(self) -> list[dict[str, Any]]:
-        """Récupère tous les joueurs (pour déduplication)."""
-        with self._session(dictionary=True) as (_, cursor):
-            cursor.execute(
-                "SELECT * FROM players ORDER BY normalized_name ASC"
-            )
-            return cursor.fetchall()
-
-    def merge_players(
-        self,
-        source_id: int,
-        target_id: int,
-        merged_by: str | None = None,
-    ) -> bool:
-        """
-        Fusionne deux profils joueurs.
-        
-        Transfert tous les matches et données du joueur source vers target.
-        Supprime le joueur source après fusion.
-        
-        Args:
-            source_id: ID du joueur à fusionner (sera supprimé)
-            target_id: ID du joueur cible (conservé)
-            merged_by: Nom de l'utilisateur qui a effectué la fusion
-        
-        Returns:
-            True si fusion réussie
-        """
-        try:
-            with self._session(dictionary=True) as (conn, cursor):
-                # Récupère les infos avant fusion
-                cursor.execute(
-                    "SELECT name FROM players WHERE id = %s",
-                    (source_id,),
-                )
-                source_row = cursor.fetchone()
-                if not source_row:
-                    logger.warning("Joueur source %s introuvable", source_id)
-                    return False
-                
-                source_name = source_row.get("name", "Inconnu")
-                
-                cursor.execute(
-                    "SELECT name FROM players WHERE id = %s",
-                    (target_id,),
-                )
-                target_row = cursor.fetchone()
-                if not target_row:
-                    logger.warning("Joueur cible %s introuvable", target_id)
-                    return False
-                
-                target_name = target_row.get("name", "Inconnu")
-                
-                # Transfère les matches du joueur source
-                cursor.execute(
-                    """
-                    UPDATE matches SET player1_id = %s WHERE player1_id = %s
-                    """,
-                    (target_id, source_id),
-                )
-                p1_count = cursor.rowcount
-                
-                cursor.execute(
-                    """
-                    UPDATE matches SET player2_id = %s WHERE player2_id = %s
-                    """,
-                    (target_id, source_id),
-                )
-                p2_count = cursor.rowcount
-                
-                cursor.execute(
-                    """
-                    UPDATE matches SET winner_id = %s WHERE winner_id = %s
-                    """,
-                    (target_id, source_id),
-                )
-                winner_count = cursor.rowcount
-                
-                # Enregistre la déduplication
-                cursor.execute(
-                    """
-                    INSERT INTO deduplication_history
-                    (source_player_id, target_player_id, source_player_name, target_player_name, merged_by)
-                    VALUES (%s, %s, %s, %s, %s)
-                    """,
-                    (source_id, target_id, source_name, target_name, merged_by or "admin"),
-                )
-                
-                # Supprime le joueur source
-                cursor.execute(
-                    "DELETE FROM players WHERE id = %s",
-                    (source_id,),
-                )
-                
-                conn.commit()
-                logger.info(
-                    "Fusion réussie: %s (id=%s) → %s (id=%s). Matches transférés: %d",
-                    source_name,
-                    source_id,
-                    target_name,
-                    target_id,
-                    p1_count + p2_count + winner_count,
-                )
-                return True
-        except Error as exc:
-            logger.exception(
-                "Erreur lors de la fusion de %s vers %s: %s",
-                source_id,
-                target_id,
-                exc,
-            )
-            return False
-
-    def get_deduplication_history(
-        self,
-        limit: int = 50,
-    ) -> list[dict[str, Any]]:
-        """Récupère l'historique des fusions."""
-        with self._session(dictionary=True) as (_, cursor):
+    def create_season(self, name: str, start_date) -> int:
+        with self._session() as (_, cursor):
             cursor.execute(
                 """
-                SELECT * FROM deduplication_history
-                ORDER BY merged_at DESC
-                LIMIT %s
-                """,
-                (limit,),
+                UPDATE seasons
+                SET is_active = 0, status = 'archived',
+                    end_date = COALESCE(end_date, CURDATE())
+                WHERE is_active = 1 OR status = 'active'
+                """
             )
-            return cursor.fetchall()
+            if isinstance(start_date, date) and start_date > date.today():
+                cursor.execute(
+                    """
+                    INSERT INTO seasons
+                    (name, start_date, is_active, status, data_reset_at)
+                    VALUES (%s, %s, 1, 'active', %s)
+                    """,
+                    (name, start_date, datetime.combine(start_date, datetime.min.time())),
+                )
+            else:
+                cursor.execute(
+                    """
+                    INSERT INTO seasons
+                    (name, start_date, is_active, status, data_reset_at)
+                    VALUES (%s, %s, 1, 'active', UTC_TIMESTAMP())
+                    """,
+                    (name, start_date),
+                )
+            return cursor.lastrowid
+
+    def start_new_season(self, name: str, start_date) -> tuple[dict[str, Any] | None, int]:
+        archived = self.archive_active_season(end_date=start_date)
+        new_id = self.create_season(name, start_date)
+        return archived, new_id
+
+    def reset_active_season_data(self) -> int:
+        """Supprime les matchs de la saison active, remet les points de base."""
+        season = self.get_active_season()
+        if not season:
+            return 0
+        with self._session(dictionary=True) as (_, cursor):
+            cursor.execute(
+                "DELETE FROM matches WHERE season_id = %s", (season["id"],)
+            )
+            deleted = cursor.rowcount
+            cursor.execute("SELECT * FROM players")
+            for row in cursor.fetchall():
+                base = base_elo_for_player(
+                    row.get("tier_rank"), bool(row.get("rank_manual"))
+                )
+                cursor.execute(
+                    "UPDATE players SET elo = %s WHERE id = %s",
+                    (base, row["id"]),
+                )
+            cursor.execute(
+                """
+                UPDATE seasons SET data_reset_at = UTC_TIMESTAMP()
+                WHERE id = %s
+                """,
+                (season["id"],),
+            )
+        logger.info(
+            "Saison active %s réinitialisée (%d matchs supprimés)",
+            season["id"],
+            deleted,
+        )
+        return deleted
 
     def count_matches_by_message(self, message_id: int) -> int:
         with self._session() as (_, cursor):
@@ -574,7 +494,10 @@ class Database:
             return cursor.rowcount
 
     def recalculate_season_elo(self, season_id: int) -> None:
-        from ranking import compute_match_elo_delta, elo_for_tier
+        active = self.get_active_season()
+        if not active or active["id"] != season_id:
+            self._replay_season_elo_snapshot(season_id)
+            return
 
         with self._session(dictionary=True) as (_, cursor):
             cursor.execute(
@@ -587,12 +510,12 @@ class Database:
                 (season_id,),
             )
             players = cursor.fetchall()
+            elo_map: dict[int, int] = {}
             for player in players:
-                if player.get("rank_manual"):
-                    base = elo_for_tier(player.get("tier_rank"))
-                else:
-                    tier = (player.get("tier_rank") or "NR").upper()
-                    base = 1000 if tier == "NR" else elo_for_tier(tier)
+                base = base_elo_for_player(
+                    player.get("tier_rank"), bool(player.get("rank_manual"))
+                )
+                elo_map[player["id"]] = base
                 cursor.execute(
                     "UPDATE players SET elo = %s WHERE id = %s",
                     (base, player["id"]),
@@ -610,23 +533,72 @@ class Database:
             matches = cursor.fetchall()
 
             for match in matches:
-                win_delta = compute_match_elo_delta(match["ft_type"], True)
-                loss_delta = compute_match_elo_delta(match["ft_type"], False)
+                winner_id = match["winner_id"]
                 loser_id = (
                     match["player2_id"]
-                    if match["winner_id"] == match["player1_id"]
+                    if winner_id == match["player1_id"]
                     else match["player1_id"]
                 )
+                winner_elo = elo_map.get(winner_id, 1000)
+                loser_elo = elo_map.get(loser_id, 1000)
+                win_delta, loss_delta = compute_match_elo_changes(
+                    winner_elo, loser_elo, match["ft_type"]
+                )
+                elo_map[winner_id] = max(0, winner_elo + win_delta)
+                elo_map[loser_id] = max(0, loser_elo + loss_delta)
                 cursor.execute(
-                    "UPDATE players SET elo = GREATEST(0, elo + %s) WHERE id = %s",
-                    (win_delta, match["winner_id"]),
+                    "UPDATE players SET elo = %s WHERE id = %s",
+                    (elo_map[winner_id], winner_id),
                 )
                 cursor.execute(
-                    "UPDATE players SET elo = GREATEST(0, elo + %s) WHERE id = %s",
-                    (loss_delta, loser_id),
+                    "UPDATE players SET elo = %s WHERE id = %s",
+                    (elo_map[loser_id], loser_id),
                 )
 
-        logger.info("Points recalculés pour la saison %s", season_id)
+        logger.info("Points recalculés (ELO compétitif) — saison %s", season_id)
+
+    def _replay_season_elo_snapshot(self, season_id: int) -> dict[int, int]:
+        """Recalcule l'ELO d'une saison archivée sans modifier la base."""
+        with self._session(dictionary=True) as (_, cursor):
+            cursor.execute(
+                """
+                SELECT DISTINCT p.id, p.tier_rank, p.rank_manual
+                FROM players p
+                JOIN matches m ON p.id IN (m.player1_id, m.player2_id)
+                WHERE m.season_id = %s
+                """,
+                (season_id,),
+            )
+            elo_map = {
+                row["id"]: base_elo_for_player(
+                    row.get("tier_rank"), bool(row.get("rank_manual"))
+                )
+                for row in cursor.fetchall()
+            }
+            cursor.execute(
+                """
+                SELECT player1_id, player2_id, ft_type, winner_id
+                FROM matches
+                WHERE season_id = %s
+                ORDER BY created_at ASC, match_index ASC
+                """,
+                (season_id,),
+            )
+            for match in cursor.fetchall():
+                winner_id = match["winner_id"]
+                loser_id = (
+                    match["player2_id"]
+                    if winner_id == match["player1_id"]
+                    else match["player1_id"]
+                )
+                win_d, loss_d = compute_match_elo_changes(
+                    elo_map.get(winner_id, 1000),
+                    elo_map.get(loser_id, 1000),
+                    match["ft_type"],
+                )
+                elo_map[winner_id] = max(0, elo_map.get(winner_id, 1000) + win_d)
+                elo_map[loser_id] = max(0, elo_map.get(loser_id, 1000) + loss_d)
+        return elo_map
 
     def count_season_matches(self, season_id: int) -> int:
         with self._session() as (_, cursor):
@@ -668,34 +640,20 @@ class Database:
     def get_or_create_player(
         self, name: str, discord_id: int | None = None
     ) -> dict[str, Any]:
-        clean_name = sanitize_player_name(name)
-        if not clean_name:
-            clean_name = name.strip()[:64]
-        normalized = normalize_name(clean_name)
+        from player_identity import resolve_or_create_player
 
-        existing = self.get_player_by_normalized_name(normalized)
-        if existing:
-            if discord_id and not existing.get("discord_id"):
-                self.link_discord_id(existing["id"], discord_id)
-                existing["discord_id"] = discord_id
-            if not self._is_valid_player(existing):
-                self._update_player_name(existing["id"], clean_name, normalized)
-                existing["name"] = clean_name
-                existing["normalized_name"] = normalized
-            return existing
+        return resolve_or_create_player(self, name, discord_id)
 
-        if discord_id:
-            by_discord = self.get_player_by_discord_id(discord_id)
-            if by_discord:
-                return by_discord
-
+    def create_player(
+        self, display_name: str, normalized: str, discord_id: int | None = None
+    ) -> dict[str, Any]:
         with self._session(dictionary=True) as (_, cursor):
             cursor.execute(
                 """
                 INSERT INTO players (discord_id, name, normalized_name)
                 VALUES (%s, %s, %s)
                 """,
-                (discord_id, clean_name, normalized),
+                (discord_id, display_name, normalized),
             )
             player_id = cursor.lastrowid
             cursor.execute("SELECT * FROM players WHERE id = %s", (player_id,))
@@ -703,6 +661,18 @@ class Database:
             if row is None:
                 raise RuntimeError(f"Joueur créé introuvable: id={player_id}")
             return row
+
+    def update_player_fields(self, player_id: int, **fields) -> None:
+        allowed = {"name", "normalized_name", "discord_id", "region", "tier_rank", "elo"}
+        updates = {k: v for k, v in fields.items() if k in allowed}
+        if not updates:
+            return
+        cols = ", ".join(f"{k} = %s" for k in updates)
+        with self._session() as (_, cursor):
+            cursor.execute(
+                f"UPDATE players SET {cols} WHERE id = %s",
+                (*updates.values(), player_id),
+            )
 
     def _update_player_name(
         self, player_id: int, name: str, normalized_name: str
@@ -823,71 +793,56 @@ class Database:
             cursor.execute(
                 f"""
                 SELECT
-                    id,
-                    name,
-                    normalized_name,
-                    discord_id,
-                    region,
-                    tier_rank,
-                    elo,
-                    last_match_at,
-                    ft_wins,
-                    ft_losses,
-                    loss_points_scored,
-                    loss_points_conceded
-                FROM (
-                    SELECT
-                        p.id,
-                        p.name,
-                        p.normalized_name,
-                        p.discord_id,
-                        p.region,
-                        p.tier_rank,
-                        p.elo,
-                        MAX(m.created_at) AS last_match_at,
-                        SUM(CASE WHEN m.winner_id = p.id THEN 1 ELSE 0 END) AS ft_wins,
-                        SUM(
-                            CASE
-                                WHEN m.winner_id != p.id
-                                 AND (m.player1_id = p.id OR m.player2_id = p.id)
-                                THEN 1 ELSE 0
-                            END
-                        ) AS ft_losses,
-                        SUM(
-                            CASE
-                                WHEN m.winner_id != p.id
-                                 AND (m.player1_id = p.id OR m.player2_id = p.id)
-                                THEN CASE WHEN m.player1_id = p.id THEN m.score1 ELSE m.score2 END
-                                ELSE 0
-                            END
-                        ) AS loss_points_scored,
-                        SUM(
-                            CASE
-                                WHEN m.winner_id != p.id
-                                 AND (m.player1_id = p.id OR m.player2_id = p.id)
-                                THEN CASE WHEN m.player1_id = p.id THEN m.score2 ELSE m.score1 END
-                                ELSE 0
-                            END
-                        ) AS loss_points_conceded
-                    FROM matches m
-                    JOIN players p ON p.id IN (m.player1_id, m.player2_id)
-                    WHERE m.season_id = %s
-                    {region_filter}
-                    {date_filter}
-                    GROUP BY p.id, p.name, p.normalized_name, p.discord_id,
-                             p.region, p.tier_rank, p.elo
-                    {active_filter}
-                ) AS leaderboard
-                ORDER BY
-                    ft_wins DESC,
-                    ft_losses ASC,
-                    (loss_points_scored / GREATEST(loss_points_conceded, 1)) DESC,
-                    elo DESC,
-                    normalized_name ASC
+                    p.id,
+                    p.name,
+                    p.normalized_name,
+                    p.discord_id,
+                    p.region,
+                    p.tier_rank,
+                    p.elo,
+                    MAX(m.created_at) AS last_match_at,
+                    SUM(CASE WHEN m.winner_id = p.id THEN 1 ELSE 0 END) AS ft_wins,
+                    SUM(
+                        CASE
+                            WHEN m.winner_id != p.id
+                             AND (m.player1_id = p.id OR m.player2_id = p.id)
+                            THEN 1 ELSE 0
+                        END
+                    ) AS ft_losses,
+                    SUM(
+                        CASE
+                            WHEN m.winner_id != p.id
+                             AND (m.player1_id = p.id OR m.player2_id = p.id)
+                            THEN CASE WHEN m.player1_id = p.id THEN m.score1 ELSE m.score2 END
+                            ELSE 0
+                        END
+                    ) AS loss_points_scored,
+                    SUM(
+                        CASE
+                            WHEN m.winner_id != p.id
+                             AND (m.player1_id = p.id OR m.player2_id = p.id)
+                            THEN CASE WHEN m.player1_id = p.id THEN m.score2 ELSE m.score1 END
+                            ELSE 0
+                        END
+                    ) AS loss_points_conceded
+                FROM matches m
+                JOIN players p ON p.id IN (m.player1_id, m.player2_id)
+                WHERE m.season_id = %s
+                {region_filter}
+                {date_filter}
+                GROUP BY p.id, p.name, p.normalized_name, p.discord_id,
+                         p.region, p.tier_rank, p.elo
+                {active_filter}
+                ORDER BY p.normalized_name ASC
                 """,
                 tuple(params),
             )
             rows = cursor.fetchall()
+
+        active = self.get_active_season()
+        archived_elo: dict[int, int] = {}
+        if active and active["id"] != season_id:
+            archived_elo = self._replay_season_elo_snapshot(season_id)
 
         for row in rows:
             row["display_name"] = self.player_display_name(row)
@@ -900,6 +855,20 @@ class Database:
                 "elo",
             ):
                 row[key] = int(row.get(key) or 0)
+            if archived_elo:
+                row["elo"] = archived_elo.get(row["id"], row["elo"])
+            wins = row["ft_wins"]
+            losses = row["ft_losses"]
+            row["winrate"] = (wins / (wins + losses) * 100) if (wins + losses) else 0.0
+
+        rows.sort(
+            key=lambda r: (
+                -int(r.get("elo") or 0),
+                -float(r.get("winrate") or 0),
+                -int(r.get("ft_wins") or 0),
+                r.get("display_name", ""),
+            )
+        )
         return rows
 
     def _normalize_tier(self, tier: str) -> str:
@@ -928,10 +897,15 @@ class Database:
     def adjust_elo_after_match(
         self, winner_id: int, loser_id: int, ft_type: int
     ) -> None:
-        from ranking import compute_match_elo_delta
-
-        win_delta = compute_match_elo_delta(ft_type, True)
-        loss_delta = compute_match_elo_delta(ft_type, False)
+        winner = self.get_player_by_id(winner_id)
+        loser = self.get_player_by_id(loser_id)
+        if not winner or not loser:
+            return
+        win_delta, loss_delta = compute_match_elo_changes(
+            int(winner.get("elo") or 1000),
+            int(loser.get("elo") or 1000),
+            ft_type,
+        )
         with self._session() as (_, cursor):
             cursor.execute(
                 "UPDATE players SET elo = GREATEST(0, elo + %s) WHERE id = %s",
@@ -980,6 +954,29 @@ class Database:
                 "UPDATE players SET region = NULL WHERE id = %s",
                 (player_id,),
             )
+
+    def list_players_without_region(self, season_id: int) -> list[dict[str, Any]]:
+        return [
+            p
+            for p in self.list_season_players(season_id)
+            if not (p.get("region") or "").strip()
+        ]
+
+    def list_players_with_region(self, season_id: int) -> list[dict[str, Any]]:
+        return [
+            p
+            for p in self.list_season_players(season_id)
+            if (p.get("region") or "").strip()
+        ]
+
+    def assign_region_bulk(self, season_id: int, region: str) -> int:
+        """Attribue une région à tous les joueurs de la saison sans région."""
+        region = region.upper()
+        count = 0
+        for player in self.list_players_without_region(season_id):
+            self.set_player_region(player["id"], region)
+            count += 1
+        return count
 
     def link_discord_id_force(self, player_id: int, discord_id: int) -> None:
         with self._session() as (_, cursor):
@@ -1048,13 +1045,9 @@ class Database:
             row["my_score"] = row["score1"] if is_player1 else row["score2"]
             row["opp_score"] = row["score2"] if is_player1 else row["score1"]
             if is_player1:
-                row["opponent_display"] = format_display_name(
-                    row.get("player2_norm", ""), row.get("player2_name", "")
-                )
+                row["opponent_display"] = row.get("player2_name") or "?"
             else:
-                row["opponent_display"] = format_display_name(
-                    row.get("player1_norm", ""), row.get("player1_name", "")
-                )
+                row["opponent_display"] = row.get("player1_name") or "?"
         return rows
 
     def get_player_stats(self, player_id: int, season_id: int) -> dict[str, Any] | None:
@@ -1226,16 +1219,9 @@ class Database:
                 return by_discord
             name = name.display_name
 
-        normalized = normalize_name(str(name))
-        if not normalized:
-            return None
+        from player_identity import find_existing_player
 
-        exact = self.get_player_by_normalized_name(normalized)
-        if exact and self._is_valid_player(exact):
-            return exact
-
-        candidates = self._fetch_player_candidates(normalized, season_id)
-        return self._best_name_match(normalized, candidates)
+        return find_existing_player(self, str(name))
 
     def get_head_to_head(
         self, player_a_id: int, player_b_id: int, season_id: int
@@ -1266,13 +1252,206 @@ class Database:
             rows = cursor.fetchall()
 
         for row in rows:
-            row["player1_display"] = format_display_name(
-                row.get("player1_norm", ""), row.get("player1_name", "")
-            )
-            row["player2_display"] = format_display_name(
-                row.get("player2_norm", ""), row.get("player2_name", "")
-            )
-            row["winner_display"] = format_display_name(
-                row.get("winner_norm", ""), row.get("winner_name", "")
-            )
+            row["player1_display"] = row.get("player1_name") or "?"
+            row["player2_display"] = row.get("player2_name") or "?"
+            row["winner_display"] = row.get("winner_name") or "?"
         return rows
+
+    def merge_player_into(self, keep_id: int, drop_id: int) -> None:
+        if keep_id == drop_id:
+            return
+        keep = self.get_player_by_id(keep_id)
+        drop = self.get_player_by_id(drop_id)
+        if not keep or not drop:
+            return
+        display = pick_display_name(keep.get("name", ""), drop.get("name", ""))
+        with self._session() as (_, cursor):
+            for col in ("player1_id", "player2_id", "winner_id"):
+                cursor.execute(
+                    f"UPDATE matches SET {col} = %s WHERE {col} = %s",
+                    (keep_id, drop_id),
+                )
+            if drop.get("discord_id") and not keep.get("discord_id"):
+                cursor.execute(
+                    "UPDATE players SET discord_id = %s WHERE id = %s",
+                    (drop["discord_id"], keep_id),
+                )
+            if not keep.get("region") and drop.get("region"):
+                cursor.execute(
+                    "UPDATE players SET region = %s WHERE id = %s",
+                    (drop["region"], keep_id),
+                )
+            cursor.execute(
+                "UPDATE players SET name = %s WHERE id = %s",
+                (display, keep_id),
+            )
+            cursor.execute("DELETE FROM players WHERE id = %s", (drop_id,))
+        logger.info("Fusion joueur %s → %s (%s)", drop_id, keep_id, display)
+
+    def deduplicate_all_players(self) -> int:
+        from player_identity import similarity
+
+        merged = 0
+        with self._session(dictionary=True) as (_, cursor):
+            cursor.execute("SELECT * FROM players ORDER BY id ASC")
+            players = cursor.fetchall()
+
+        key_owner: dict[str, int] = {}
+        for player in players:
+            key = normalize_key(player.get("name", ""))
+            if not key:
+                continue
+            if key != player.get("normalized_name"):
+                self.update_player_fields(player["id"], normalized_name=key)
+
+            owner = key_owner.get(key)
+            if owner and owner != player["id"]:
+                self.merge_player_into(owner, player["id"])
+                merged += 1
+            else:
+                key_owner[key] = player["id"]
+
+        remaining = self.list_all_players()
+        for i, a in enumerate(remaining):
+            key_a = a.get("normalized_name") or normalize_key(a.get("name", ""))
+            for b in remaining[i + 1 :]:
+                key_b = b.get("normalized_name") or normalize_key(b.get("name", ""))
+                if similarity(key_a, key_b) >= config.SIMILARITY_THRESHOLD:
+                    self.merge_player_into(a["id"], b["id"])
+                    merged += 1
+        if merged:
+            logger.info("Déduplication : %d fusion(s)", merged)
+        return merged
+
+    def export_backup(self, path: Path) -> Path:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        data: dict[str, Any] = {"exported_at": datetime.utcnow().isoformat()}
+        with self._session(dictionary=True) as (_, cursor):
+            cursor.execute("SELECT * FROM seasons ORDER BY id")
+            data["seasons"] = cursor.fetchall()
+            cursor.execute("SELECT * FROM players ORDER BY id")
+            data["players"] = cursor.fetchall()
+            cursor.execute("SELECT * FROM matches ORDER BY id")
+            data["matches"] = cursor.fetchall()
+            cursor.execute("SELECT * FROM bot_settings")
+            data["bot_settings"] = cursor.fetchall()
+        for table in ("seasons", "players", "matches"):
+            for row in data[table]:
+                for k, v in list(row.items()):
+                    if isinstance(v, (date, datetime)):
+                        row[k] = v.isoformat()
+        path.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
+        return path
+
+    def restore_backup(self, path: Path) -> None:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        with self._session() as (_, cursor):
+            cursor.execute("SET FOREIGN_KEY_CHECKS = 0")
+            cursor.execute("TRUNCATE TABLE matches")
+            cursor.execute("TRUNCATE TABLE players")
+            cursor.execute("TRUNCATE TABLE seasons")
+            cursor.execute("TRUNCATE TABLE bot_settings")
+            cursor.execute("SET FOREIGN_KEY_CHECKS = 1")
+            for season in raw.get("seasons", []):
+                cursor.execute(
+                    """
+                    INSERT INTO seasons
+                    (id, name, start_date, end_date, is_active, status,
+                     data_reset_at, created_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        season["id"],
+                        season["name"],
+                        season["start_date"],
+                        season.get("end_date"),
+                        season.get("is_active", 0),
+                        season.get("status", "archived"),
+                        season.get("data_reset_at"),
+                        season.get("created_at"),
+                    ),
+                )
+            for player in raw.get("players", []):
+                cursor.execute(
+                    """
+                    INSERT INTO players
+                    (id, discord_id, name, normalized_name, region, tier_rank, elo, rank_manual)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                    """,
+                    (
+                        player["id"],
+                        player.get("discord_id"),
+                        player["name"],
+                        player["normalized_name"],
+                        player.get("region"),
+                        player.get("tier_rank", "NR"),
+                        player.get("elo", 1000),
+                        player.get("rank_manual", 0),
+                    ),
+                )
+            for match in raw.get("matches", []):
+                cursor.execute(
+                    """
+                    INSERT INTO matches
+                    (id, message_id, match_index, season_id, player1_id, player2_id,
+                     score1, score2, ft_type, winner_id, created_at)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    """,
+                    (
+                        match["id"],
+                        match["message_id"],
+                        match.get("match_index", 0),
+                        match["season_id"],
+                        match["player1_id"],
+                        match["player2_id"],
+                        match["score1"],
+                        match["score2"],
+                        match["ft_type"],
+                        match["winner_id"],
+                        match.get("created_at"),
+                    ),
+                )
+            for setting in raw.get("bot_settings", []):
+                cursor.execute(
+                    """
+                    INSERT INTO bot_settings (setting_key, setting_value)
+                    VALUES (%s, %s)
+                    """,
+                    (setting["setting_key"], setting["setting_value"]),
+                )
+
+    def wipe_all_and_reset(self) -> None:
+        """Vide toutes les tables et recrée une saison vierge."""
+        with self._session() as (_, cursor):
+            cursor.execute("SET FOREIGN_KEY_CHECKS = 0")
+            cursor.execute("TRUNCATE TABLE matches")
+            cursor.execute("TRUNCATE TABLE players")
+            cursor.execute("TRUNCATE TABLE seasons")
+            cursor.execute("TRUNCATE TABLE bot_settings")
+            cursor.execute("SET FOREIGN_KEY_CHECKS = 1")
+        self.create_season("Saison 1", date.today())
+        logger.info("Base vidée et réinitialisée à zéro")
+
+    def health_report(self) -> dict[str, Any]:
+        season = self.get_active_season()
+        with self._session() as (_, cursor):
+            cursor.execute("SELECT COUNT(*) FROM players")
+            players = int(cursor.fetchone()[0])
+            cursor.execute("SELECT COUNT(*) FROM matches")
+            matches = int(cursor.fetchone()[0])
+            cursor.execute(
+                """
+                SELECT COUNT(*) FROM (
+                    SELECT normalized_name FROM players
+                    GROUP BY normalized_name HAVING COUNT(*) > 1
+                ) d
+                """
+            )
+            dup_keys = int(cursor.fetchone()[0])
+        return {
+            "db_ok": True,
+            "active_season": season,
+            "players": players,
+            "matches": matches,
+            "duplicate_keys": dup_keys,
+        }

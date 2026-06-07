@@ -13,7 +13,9 @@ def _fmt_date(dt) -> str:
         return "—"
     if isinstance(dt, datetime):
         return dt.strftime("%d/%m/%Y")
-    return str(dt)
+    if hasattr(dt, "strftime"):
+        return dt.strftime("%d/%m/%Y")
+    return str(dt)[:10]
 
 
 def _region_label(region: str | None) -> str:
@@ -24,81 +26,15 @@ def _match_result_label(won: bool) -> str:
     return "Gagné" if won else "Perdu"
 
 
-# ============================================================================
-# PHASE 3 TÂCHE 9: NOUVEAU SYSTÈME DE SCORING
-# ============================================================================
+def _leaderboard_table(rows: list[dict], *, show_region: bool = True) -> str:
+    if not rows:
+        return "Aucun joueur classé."
 
-def calculate_player_score(
-    elo: int,
-    wins: int,
-    losses: int,
-    last_match_at: datetime | None,
-) -> int:
-    """
-    Calcule le score composite du joueur selon la formule Phase 3 Tâche 9.
-    
-    Formule: Score = (ELO × 0.5) + (taux % × 0.3) + (bonus_activité × 0.15) + (matchs × 0.05)
-    
-    Où:
-    - ELO : Points ELO actuels (poids 50%)
-    - taux % : Taux de victoire en % (poids 30%)
-    - bonus_activité : Points bonus selon récence (poids 15%)
-      * <7j : +50
-      * <14j : +25
-      * <30j : +10
-      * ≥30j : +0
-    - matchs : Nombre de matchs joués (poids 5%)
-    
-    Args:
-        elo: Points ELO
-        wins: Nombre de victoires
-        losses: Nombre de défaites
-        last_match_at: Date du dernier match
-    
-    Returns:
-        Score composite arrondi
-    """
-    # Composante 1 : ELO (poids 50%)
-    elo_component = elo * 0.5
-    
-    # Composante 2 : Taux de victoire (poids 30%)
-    total_matches = wins + losses
-    if total_matches > 0:
-        win_percentage = (wins / total_matches) * 100
-        win_component = win_percentage * 0.3
-    else:
-        win_component = 0.0
-    
-    # Composante 3 : Bonus activité (poids 15%)
-    activity_bonus = 0.0
-    if last_match_at:
-        now = datetime.now(timezone.utc)
-        if isinstance(last_match_at, str):
-            try:
-                last_match_at = datetime.fromisoformat(last_match_at)
-                if last_match_at.tzinfo is None:
-                    last_match_at = last_match_at.replace(tzinfo=timezone.utc)
-            except (ValueError, TypeError):
-                last_match_at = None
-        
-        if last_match_at:
-            days_since = (now - last_match_at).days
-            if days_since < 7:
-                activity_bonus = 50.0
-            elif days_since < 14:
-                activity_bonus = 25.0
-            elif days_since < 30:
-                activity_bonus = 10.0
-    
-    activity_component = activity_bonus * 0.15
-    
-    # Composante 4 : Nombre de matchs (poids 5%)
-    match_component = total_matches * 0.05
-    
-    # Score total
-    total_score = elo_component + win_component + activity_component + match_component
-    
-    return int(round(total_score))
+    lines = []
+    for pos, row in enumerate(rows, start=1):
+        name = row.get("display_name") or "?"
+        lines.append(f"**{pos}.** {name}")
+    return "\n".join(lines)
 
 
 def format_leaderboard(
@@ -107,96 +43,38 @@ def format_leaderboard(
     *,
     region: str | None = None,
     title: str = "CLASSEMENT OFFICIEL",
-    date_debut=None,
-    date_fin=None,
-    use_new_scoring: bool = False,
+    season_info: dict | None = None,
 ) -> str:
-    """
-    Formate le classement avec tri intelligentoptionnel nouveau scoring.
-    
-    Args:
-        use_new_scoring: Si True, utilise la formule composée Phase 3 Tâche 9
-    """
-    debut = date_debut if date_debut else config.START_DATE
-    display_fin = date_fin if date_fin else datetime.now(timezone.utc)
+    season = season_info or db.get_season(season_id) or db.get_active_season()
+    debut = season.get("start_date") if season else config.START_DATE
+    fin = season.get("end_date") if season and season.get("status") == "archived" else datetime.now(timezone.utc)
 
-    rows = db.get_leaderboard(
-        season_id,
-        region=region,
-        active_only=False,
-        date_debut=debut,
-        date_fin=date_fin,
-    )
-
-    # Calcule les scores si nouveau système activé
-    if use_new_scoring and rows:
-        for row in rows:
-            row["score"] = calculate_player_score(
-                row.get("elo", 0),
-                row.get("ft_wins", 0),
-                row.get("ft_losses", 0),
-                row.get("last_match_at"),
-            )
-        # Trie par score DESC
-        rows.sort(key=lambda r: r.get("score", 0), reverse=True)
+    rows = db.get_leaderboard(season_id, region=region, active_only=False)
 
     lines = [
         f"**{title}**",
         "",
-        f"Période : {_fmt_date(debut)} → {_fmt_date(display_fin)}",
+        f"Période : {_fmt_date(debut)} → {_fmt_date(fin)}",
     ]
     if region:
-        lines.append(f"Région : {region}")
-    if use_new_scoring:
-        lines.append("Tri par score composite (ELO + activité + résultats)")
-    else:
-        lines.append("Basé sur les confrontations enregistrées")
+        lines.append(f"Région : **{region}**")
+    if season:
+        lines.append(f"Saison : **{season.get('name', '?')}**")
     lines.append("")
-
-    if not rows:
-        lines.append("Aucune confrontation sur cette période.")
-        return "\n".join(lines)
-
-    for pos, row in enumerate(rows, start=1):
-        name = row.get("display_name") or row["name"]
-        tier = format_tier(row.get("tier_rank"))
-        reg = _region_label(row.get("region"))
-        points = int(row.get("elo") or 0)
-        wins = int(row["ft_wins"] or 0)
-        losses = int(row["ft_losses"] or 0)
-        ratio = win_ratio(wins, losses)
-        
-        if use_new_scoring:
-            score = row.get("score", 0)
-            lines.append(f"**TOP {pos} — {name}**")
-            lines.append(f"Score : {score} | ELO : {points}")
-            lines.append(f"Rang : {tier}")
-            if not region:
-                lines.append(f"Région : {reg}")
-            lines.append(f"Ratio : {ratio:.0f}% ({wins}V-{losses}D)")
-        else:
-            lines.append(f"**TOP {pos} — {name}**")
-            lines.append(f"Rang : {tier}")
-            if not region:
-                lines.append(f"Région : {reg}")
-            lines.append(f"Points : {points}")
-            lines.append(f"FT gagnés : {wins}")
-            lines.append(f"Défaites : {losses}")
-            lines.append(f"Ratio : {ratio:.0f}%")
-        lines.append("")
-
-    lines.append(f"{len(rows)} joueur(s) classés")
+    lines.append(_leaderboard_table(rows, show_region=not bool(region)))
+    lines.append(f"**{len(rows)}** joueur(s) classés")
     return "\n".join(lines).strip()
 
 
 def format_live_leaderboard_blocks(db: Database, season_id: int) -> list[str]:
-    """Classements officiels par ville : BZ et PN uniquement."""
+    season = db.get_active_season()
     return [
         format_leaderboard(
             db,
             season_id,
             region=region,
             title=config.official_region_title(region),
+            season_info=season,
         )
         for region in config.VALID_REGIONS
     ]
@@ -216,18 +94,18 @@ def format_player_stats(stats: dict[str, Any] | None, player_name: str = "") -> 
     matches = stats.get("matches") or []
 
     lines = [
-        f"**STATS — {name}**",
+        f"**STATISTIQUES — {name}**",
         "",
-        f"Rang : {tier}",
+        f"Rang : `{tier}`",
         f"Région : {reg}",
         f"Points : {points}",
         "",
-        "**GLOBAL**",
+        "**TOTAL**",
         f"FT gagnés : {wins}",
         f"Défaites : {losses}",
-        f"Taux de victoire : {ratio:.0f}%",
+        f"Winrate : {ratio:.0f} %",
         "",
-        "**DETAIL PAR FT**",
+        "**DÉTAIL PAR FT**",
     ]
 
     ft_details = []
@@ -241,7 +119,7 @@ def format_player_stats(stats: dict[str, Any] | None, player_name: str = "") -> 
 
     lines.extend(ft_details if ft_details else ["Aucun match enregistré."])
     lines.append("")
-    lines.append("**MATCH HISTORY**")
+    lines.append("**HISTORIQUE DES MATCHS**")
 
     history_blocks = []
     for ft in FT_LABELS:
@@ -315,11 +193,11 @@ def format_comparison(
         f"Confrontations : {len(matches)}",
         f"FT gagnés : {label_a} {wins_a} — {wins_b} {label_b}",
         "",
-        "**DETAIL PAR FT**",
+        "**DÉTAIL PAR FT**",
     ])
 
     ft_lines = _ft_head_to_head(matches, player_a, player_b, label_a, label_b)
-    lines.extend(ft_lines if ft_lines else ["Aucun détail par FT."])
+    lines.extend(ft_lines if ft_lines else ["Aucun détail par format FT."])
     lines.append("")
     lines.append("**HISTORIQUE**")
 
@@ -347,14 +225,7 @@ def format_comparison(
             winner = m.get("winner_display") or m["winner_name"]
 
         lines.append(
-            f"{p1} {m['score1']}-{m['score2']} {p2} → {winner} a Gagné ({date_str})"
+            f"{p1} {m['score1']}-{m['score2']} {p2} → victoire {winner} ({date_str})"
         )
 
     return "\n".join(lines).strip()
-
-
-def resolve_player(db: Database, joueur, season_id: int | None = None):
-    from player_resolver import resolve_player_input
-
-    result = resolve_player_input(db, joueur, season_id)
-    return result.player if result.found else None

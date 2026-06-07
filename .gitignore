@@ -1,32 +1,7 @@
-# Secrets
 .env
-.env.*
-!.env.example
-
-# Logs (console only en prod par défaut)
-*.log
+bot.log
 bot.log.*
-logs/
-
-# Python
 __pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
+*.pyc
 .venv/
 venv/
-env/
-*.egg-info/
-dist/
-build/
-
-# IDE / OS
-.idea/
-.vscode/
-*.swp
-.DS_Store
-Thumbs.db
-
-# Docker volumes locaux
-mysql_data/

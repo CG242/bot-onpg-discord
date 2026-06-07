@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from datetime import timezone
+from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 
 import discord
@@ -8,40 +8,30 @@ from discord.ext import commands
 
 import config
 from commands import setup_commands
-from admin_commands import setup_admin_commands
 from database import Database
 from parser import normalize_name, parse_all_matches
 from stats import format_live_leaderboard_blocks
 
 
 def setup_logging() -> None:
-    level = getattr(logging, config.LOG_LEVEL, logging.INFO)
     formatter = logging.Formatter(
         "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
     )
     console = logging.StreamHandler()
     console.setFormatter(formatter)
-
-    handlers = [console]
-    if config.LOG_TO_FILE:
-        file_handler = RotatingFileHandler(
-            config.LOG_FILE,
-            maxBytes=512_000,
-            backupCount=1,
-            encoding="utf-8",
-        )
-        file_handler.setFormatter(formatter)
-        handlers.append(file_handler)
+    file_handler = RotatingFileHandler(
+        config.LOG_FILE, maxBytes=1_000_000, backupCount=3, encoding="utf-8"
+    )
+    file_handler.setFormatter(formatter)
 
     for name in (
         "__main__", "database", "commands", "parser", "stats",
         "views", "player_resolver", "ranking",
     ):
         app_logger = logging.getLogger(name)
-        app_logger.setLevel(level)
-        app_logger.handlers.clear()
-        for handler in handlers:
-            app_logger.addHandler(handler)
+        app_logger.setLevel(logging.INFO)
+        app_logger.addHandler(console)
+        app_logger.addHandler(file_handler)
         app_logger.propagate = False
 
 
@@ -75,13 +65,24 @@ class FTBot(commands.Bot):
         self._auto_sync_task: asyncio.Task | None = None
 
     async def setup_hook(self) -> None:
+        # Supprimer les anciennes commandes globales (évite les doublons guild + global)
+        self.tree.clear_commands(guild=None)
+        try:
+            await self.tree.sync()
+        except Exception:
+            logger.warning("Nettoyage des commandes globales ignoré")
+
         setup_commands(self.tree, self.db)
-        setup_admin_commands(self.tree, self.db)  # Phase 2: Commandes admin
+
         if config.GUILD_ID:
             guild = discord.Object(id=config.GUILD_ID)
             self.tree.copy_global_to(guild=guild)
-            await self.tree.sync(guild=guild)
-            logger.info("Commandes synchronisées pour le serveur %s", config.GUILD_ID)
+            synced = await self.tree.sync(guild=guild)
+            logger.info(
+                "Commandes synchronisées (%d) pour le serveur %s",
+                len(synced),
+                config.GUILD_ID,
+            )
         else:
             await self.tree.sync()
             logger.warning(
@@ -238,7 +239,22 @@ class FTBot(commands.Bot):
         if message.author.bot:
             return False
 
-        if message.created_at < config.START_DATE:
+        season = self.db.get_active_season()
+        if not season:
+            return False
+
+        cutoff = self.db.get_season_score_cutoff(season)
+        msg_date = message.created_at
+        if msg_date.tzinfo is None:
+            msg_date = msg_date.replace(tzinfo=timezone.utc)
+        if isinstance(cutoff, datetime):
+            if cutoff.tzinfo is None:
+                cutoff = cutoff.replace(tzinfo=timezone.utc)
+        else:
+            cutoff = datetime.combine(cutoff, datetime.min.time()).replace(
+                tzinfo=timezone.utc
+            )
+        if msg_date < cutoff:
             return False
 
         parsed_list = parse_all_matches(message.content or "")
@@ -257,11 +273,6 @@ class FTBot(commands.Bot):
             )
 
         if not parsed_list:
-            return bool(old_signature)
-
-        season = self.db.get_active_season()
-        if not season:
-            logger.error("Aucune saison active")
             return bool(old_signature)
 
         guild = message.guild
@@ -371,6 +382,13 @@ class FTBot(commands.Bot):
     async def sync_guild_scores(
         self, guild: discord.Guild, *, quiet: bool = False
     ) -> None:
+        season = self.db.get_active_season()
+        if not season:
+            if not quiet:
+                logger.info("Aucune saison active — sync scores ignorée")
+            return
+
+        cutoff = self.db.get_season_score_cutoff(season)
         discord_message_ids: set[int] = set()
         sync_count = 0
 
@@ -390,7 +408,7 @@ class FTBot(commands.Bot):
                     channel.name,
                     region_label,
                     guild.name,
-                    config.START_DATE.date(),
+                    cutoff,
                 )
 
             processed = 0
@@ -406,7 +424,7 @@ class FTBot(commands.Bot):
                 for scan_channel in channels_to_scan:
                     async for message in scan_channel.history(
                         limit=None,
-                        after=config.START_DATE,
+                        after=cutoff,
                         oldest_first=True,
                     ):
                         if message.author.bot:
@@ -427,8 +445,7 @@ class FTBot(commands.Bot):
             if not quiet:
                 logger.info("Sync #%s terminée (%d messages)", channel.name, processed)
 
-        season = self.db.get_active_season()
-        if season and discord_message_ids:
+        if discord_message_ids:
             removed = await asyncio.to_thread(
                 self.db.delete_matches_not_in_message_ids,
                 season["id"],

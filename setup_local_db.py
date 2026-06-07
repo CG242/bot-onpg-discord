@@ -1,10 +1,8 @@
-#!/usr/bin/env python3
-"""Crée la base MySQL et les tables. Usage: python scripts/setup_db.py"""
+"""
+Initialise la base MySQL locale (WAMP) et crée les tables via database.py.
+Usage: py -3 setup_local_db.py
+"""
 import sys
-from pathlib import Path
-
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
 
 import mysql.connector
 from mysql.connector import Error
@@ -19,37 +17,42 @@ def create_database() -> None:
             host=config.MYSQL_HOST,
             user=config.MYSQL_USER,
             password=config.MYSQL_PASSWORD,
-            port=config.MYSQL_PORT,
         )
     except Error as exc:
-        print(f"Erreur connexion MySQL ({config.MYSQL_HOST}): {exc}")
+        print("Impossible de se connecter a MySQL.")
+        print(f"  Host: {config.MYSQL_HOST}")
+        print(f"  User: {config.MYSQL_USER}")
+        print(f"  Erreur: {exc}")
+        print("\nVerifiez que WAMP est demarre (icone verte) et que MySQL tourne.")
         sys.exit(1)
 
     cursor = conn.cursor()
     cursor.execute(
         f"""
         CREATE DATABASE IF NOT EXISTS `{config.MYSQL_DATABASE}`
-        CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+        CHARACTER SET utf8mb4
+        COLLATE utf8mb4_unicode_ci
         """
     )
     conn.commit()
     cursor.close()
     conn.close()
-    print(f"Base `{config.MYSQL_DATABASE}` OK")
+    print(f"Base `{config.MYSQL_DATABASE}` creee ou deja existante.")
 
 
 def init_tables() -> None:
     db = Database()
     db.init_schema()
     season = db.get_active_season()
-    print(f"Tables OK — saison: {season['name']} (id={season['id']})")
+    print(f"Tables creees. Saison active: {season['name']} (id={season['id']})")
 
 
 def main() -> None:
-    print("=== Setup base FT Championship ===")
+    print("=== Setup base locale FT Championship ===\n")
     create_database()
     init_tables()
-    print("Terminé.")
+    print("\nPret pour les tests locaux.")
+    print("Lancez le bot avec: py -3 bot.py")
 
 
 if __name__ == "__main__":

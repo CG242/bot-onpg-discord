@@ -1,11 +1,10 @@
 @echo off
 cd /d "%~dp0"
 if not exist .env (
-    copy .env.example .env
-    echo Remplissez .env puis relancez.
+    echo Copiez .env.example vers .env et remplissez vos identifiants.
     pause
     exit /b 1
 )
-py -3 -m pip install -r requirements.txt -q
-set LOG_TO_FILE=false
+python -m pip install -r requirements.txt
 py -3 bot.py
+pause

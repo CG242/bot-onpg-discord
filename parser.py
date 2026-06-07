@@ -1,4 +1,5 @@
 import re
+import unicodedata
 from dataclasses import dataclass
 
 import config
@@ -15,6 +16,11 @@ class ParsedMatch:
     player2: str
     ft_type: int
     winner_side: int  # 1 or 2
+
+
+def strip_accents(text: str) -> str:
+    normalized = unicodedata.normalize("NFD", text)
+    return "".join(c for c in normalized if unicodedata.category(c) != "Mn")
 
 
 def sanitize_player_name(name) -> str:
@@ -39,19 +45,39 @@ def is_valid_player_name(name: str) -> bool:
     return len(name.strip()) <= 64
 
 
-def format_display_name(normalized_name: str, fallback: str = "") -> str:
-    source = normalized_name or normalize_name(fallback)
-    if not source:
-        return "Inconnu"
-    return " ".join(part.capitalize() for part in source.split())
+def normalize_key(name: str) -> str:
+    """
+    Clé interne unique : accents, espaces, tirets, underscores et « le » retirés.
+    David MK / David_MK / Le David MK → davidmk
+    """
+    cleaned = sanitize_player_name(name) if name else str(name or "")
+    cleaned = strip_accents(cleaned).lower().strip()
+    if cleaned.startswith("le "):
+        cleaned = cleaned[3:].strip()
+    cleaned = re.sub(r"[\s_\-]+", "", cleaned)
+    return cleaned
 
 
 def normalize_name(name: str) -> str:
-    cleaned = sanitize_player_name(name) if name else ""
-    cleaned = " ".join(cleaned.split()).lower()
-    if cleaned.startswith("le "):
-        cleaned = cleaned[3:].strip()
-    return cleaned
+    """Alias — clé interne de déduplication."""
+    return normalize_key(name)
+
+
+def pick_display_name(current: str, candidate: str) -> str:
+    """Conserve le pseudo le plus lisible pour l'affichage Discord."""
+    cur = sanitize_player_name(current)
+    cand = sanitize_player_name(candidate)
+    if not cur:
+        return cand
+    if not cand:
+        return cur
+    if len(cand) > len(cur):
+        return cand
+    if " " in cand and " " not in cur:
+        return cand
+    if "_" not in cand and "_" in cur:
+        return cand
+    return cur
 
 
 def _clean_line(line: str) -> str:
@@ -97,7 +123,6 @@ def parse_single_line(line: str) -> ParsedMatch | None:
 
 
 def parse_match_message(content: str) -> ParsedMatch | None:
-    """Compatibilité : retourne le premier match d'un message."""
     matches = parse_all_matches(content)
     return matches[0] if matches else None
 
