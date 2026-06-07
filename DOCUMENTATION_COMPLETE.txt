@@ -1,0 +1,1163 @@
+================================================================================
+                    BOT DISCORD FT-CHAMPIONSHIP
+                        DOCUMENTATION COMPLÈTE
+================================================================================
+
+VERSION : 1.0
+DATE : 07 Juin 2026
+AUTEUR : Développement ONPG
+DÉPÔT : https://github.com/CG242/bot-onpg-discord
+
+================================================================================
+TABLE DES MATIÈRES
+================================================================================
+
+1. PRÉSENTATION GÉNÉRALE
+2. ARCHITECTURE SYSTÈME
+3. BASE DE DONNÉES COMPLÈTE
+4. FLUX DE TRAITEMENT
+5. COMMANDES DISPONIBLES
+6. SYSTÈME DE RANGS & ELO
+7. GESTION DES JOUEURS
+8. SYNCHRONISATION AUTOMATIQUE
+9. CONFIGURATION
+10. DÉPLOIEMENT
+11. CORRECTION DE BUGS
+12. FICHIERS & STRUCTURE
+
+================================================================================
+1. PRÉSENTATION GÉNÉRALE
+================================================================================
+
+OBJECTIF :
+  Bot Discord pour gérer un championnat de FT (Fighting Tournament) entre joueurs.
+  
+FONCTIONNALITÉS PRINCIPALES :
+  ✓ Enregistrement automatique des scores
+  ✓ Classements dynamiques par région (BZ, PN)
+  ✓ Système de rangs et ELO pour chaque joueur
+  ✓ Historique complet des matchs
+  ✓ Commandes slash (/) intuitives
+  ✓ Synchronisation automatique toutes les 3 minutes
+  ✓ Liens Discord↔Pseudo
+
+LANGUES :
+  - Interface : Français
+  - Code : Python 3.12+
+  - Base : MySQL 8.0+
+
+RÉGIONS SUPPORTÉES :
+  - BZ (Brazzaville)
+  - PN (Pointe-Noire)
+
+TYPES DE MATCHS :
+  - FT2, FT3, FT5, FT7, FT10
+  (Déterminés par le score maximum)
+
+================================================================================
+2. ARCHITECTURE SYSTÈME
+================================================================================
+
+DIAGRAMME DE FLUX :
+┌─────────────────────────────────────────────────────┐
+│         SERVEUR DISCORD (discord.py)                │
+│  - Écoute des messages dans #scores                 │
+│  - Traite les commandes slash (/)                   │
+└────────────────┬────────────────────────────────────┘
+                 │
+         ┌───────▼────────┐
+         │   BOT LOGIC    │
+         │  (bot.py)      │
+         └───────┬────────┘
+                 │
+    ┌────────────┼────────────┐
+    │            │            │
+    ▼            ▼            ▼
+  PARSER    COMMANDS      VIEWS/UI
+  (format)  (slash)      (buttons)
+    │            │            │
+    └────────────┼────────────┘
+                 │
+         ┌───────▼────────┐
+         │  DATABASE      │
+         │ (database.py)  │
+         │ MySQL via      │
+         │ mysql-connector│
+         └───────┬────────┘
+                 │
+         ┌───────▼────────┐
+         │  MySQL 8.0+    │
+         │ ft_championship│
+         └────────────────┘
+
+COMPOSANTS :
+
+bot.py
+  - Classe FTBot (extend commands.Bot)
+  - setup_hook() : Synchronise les commandes
+  - on_ready() : Au démarrage
+  - on_message() : Capture les scores
+  - _sync_message_scores_sync() : Parse et enregistre les matchs
+  - _auto_sync_loop() : Toutes les 180 sec
+  - update_leaderboard_message() : Met à jour le classement
+
+commands.py
+  - Toutes les commandes slash (/)
+  - /aide, /classement, /stats, /compare
+  - /set-rang, /region-definir (admin)
+
+database.py
+  - Classe Database : interface MySQL
+  - get_leaderboard() : Requête SQL avec agrégations
+  - insert_match() : Enregistre un match
+  - get_player_stats() : Stats d'un joueur
+  - get_head_to_head() : Confrontations entre 2 joueurs
+
+parser.py
+  - parse_all_matches() : Extrait les scores des messages
+  - sanitize_player_name() : Nettoie les noms
+  - normalize_name() : Normalise pour recherche
+  - ParsedMatch : Dataclass pour un match parsé
+
+ranking.py
+  - compute_match_elo_delta() : Calcule les points gagnés/perdus
+  - elo_for_tier() : Points de base pour un rang
+  - format_tier() : Formate le rang (S+→"S+", NR→"Non classé")
+  - win_ratio() : Calcule le taux de victoire en %
+
+stats.py
+  - format_leaderboard() : Formate le classement
+  - format_player_stats() : Fiche d'un joueur
+  - format_comparison() : Duel entre 2 joueurs
+
+views.py
+  - PlayerNotFoundView : Créer/Lier joueur
+  - RegionManageView : Gérer régions
+  - RankManageView : Gérer rangs
+  - Boutons interactifs Discord
+
+player_resolver.py
+  - resolve_player_input() : Cherche un joueur par pseudo/mention
+  - Fuzzy matching pour recherche floue
+
+config.py
+  - Charge variables d'environnement (.env)
+  - Constantes du bot (FT_TYPES, VALID_TIERS, etc)
+
+================================================================================
+3. BASE DE DONNÉES COMPLÈTE
+================================================================================
+
+BASE : ft_championship
+
+TABLE 1 : seasons
+───────────────────────────────────────────────────────────────
+  Colonne          | Type         | Clé/Défaut | Description
+───────────────────────────────────────────────────────────────
+  id               | INT          | PK AUTO    | ID unique
+  name             | VARCHAR(100) | NOT NULL   | Ex: "Saison 1"
+  start_date       | DATE         | NOT NULL   | Date début (2026-01-01)
+  is_active        | TINYINT(1)   | NOT NULL   | 1=active, 0=archive
+  created_at       | TIMESTAMP    | CURRENT   | Quand créé
+
+USAGE : Créer plusieurs saisons indépendantes
+
+EXEMPLE :
+  id=1, name="Saison 1", start_date=2026-01-01, is_active=1
+
+───────────────────────────────────────────────────────────────
+
+TABLE 2 : players
+───────────────────────────────────────────────────────────────
+  Colonne          | Type         | Clé/Défaut | Description
+───────────────────────────────────────────────────────────────
+  id               | INT          | PK AUTO    | ID unique
+  discord_id       | BIGINT       | UNIQUE NULL| Compte Discord (optionnel)
+  name             | VARCHAR(255) | NOT NULL   | Affichage (Leleo242)
+  normalized_name  | VARCHAR(191) | UNIQUE     | Recherche (leleo242)
+  region           | VARCHAR(2)   | NULL       | "BZ", "PN", ou NULL
+  tier_rank        | VARCHAR(5)   | DEFAULT NR | "S+","S","A+","A","B+","B","NR"
+  elo              | INT          | DEFAULT 1000| Points (0-2400)
+  rank_manual      | TINYINT(1)   | DEFAULT 0  | 1=rang fixé admin, 0=auto
+  [pas created_at] |              |            |
+
+USAGE : Un joueur = une ligne unique avec ses stats
+
+INDICES :
+  - PRIMARY KEY (id)
+  - UNIQUE (discord_id)
+  - UNIQUE (normalized_name)
+
+EXEMPLE :
+  id=5, discord_id=123456789, name="Leleo242", normalized_name="leleo242",
+  region="BZ", tier_rank="S+", elo=2450, rank_manual=1
+
+───────────────────────────────────────────────────────────────
+
+TABLE 3 : matches
+───────────────────────────────────────────────────────────────
+  Colonne          | Type         | Clé/Défaut | Description
+───────────────────────────────────────────────────────────────
+  id               | INT          | PK AUTO    | ID unique
+  message_id       | BIGINT       | NOT NULL   | ID du message Discord
+  match_index      | INT          | DEFAULT 0  | Index si plusieurs/msg
+  season_id        | INT          | NOT NULL   | FK → seasons
+  player1_id       | INT          | NOT NULL   | FK → players
+  player2_id       | INT          | NOT NULL   | FK → players
+  score1           | INT          | NOT NULL   | Score joueur 1
+  score2           | INT          | NOT NULL   | Score joueur 2
+  ft_type          | INT          | NOT NULL   | 2, 3, 5, 7, ou 10
+  winner_id        | INT          | NOT NULL   | FK → players (gagnant)
+  created_at       | TIMESTAMP    | CURRENT   | Quand score posté
+
+USAGE : Historique complet de tous les matchs
+
+INDICES :
+  - PRIMARY KEY (id)
+  - UNIQUE KEY (message_id, match_index)
+  - FOREIGN KEY (season_id) REFERENCES seasons(id)
+  - FOREIGN KEY (player1_id) REFERENCES players(id)
+  - FOREIGN KEY (player2_id) REFERENCES players(id)
+  - FOREIGN KEY (winner_id) REFERENCES players(id)
+
+EXEMPLE :
+  id=42, message_id=987654321, match_index=0, season_id=1,
+  player1_id=5, player2_id=8, score1=5, score2=1, ft_type=5,
+  winner_id=5, created_at=2026-06-07 14:30:00
+
+───────────────────────────────────────────────────────────────
+
+TABLE 4 : bot_settings
+───────────────────────────────────────────────────────────────
+  Colonne          | Type         | Clé/Défaut | Description
+───────────────────────────────────────────────────────────────
+  setting_key      | VARCHAR(50)  | PK         | Clé paramètre
+  setting_value    | VARCHAR(255) | NOT NULL   | Valeur
+
+USAGE : Stocke configuration dynamique
+
+CLÉS UTILISÉES :
+  - leaderboard_message_ids_GUILD_ID : "789,790,791" (IDs messages à update)
+  - leaderboard_message_id_GUILD_ID : Obsolète (legacy)
+
+EXEMPLE :
+  setting_key="leaderboard_message_ids_123456789"
+  setting_value="987654321,987654322,987654323"
+
+───────────────────────────────────────────────────────────────
+
+MIGRATIONS AUTOMATIQUES (au démarrage) :
+
+1. Colonne match_index → ajoutée si manquante
+2. Index message_id ancien → supprimé si présent
+3. Index unique (message_id, match_index) → créé si manquant
+4. Colonne region → ajoutée si manquante
+5. Colonne tier_rank → ajoutée si manquante
+6. Colonne elo → ajoutée si manquante
+7. Colonne rank_manual → ajoutée si manquante
+
+================================================================================
+4. FLUX DE TRAITEMENT COMPLET D'UN SCORE
+================================================================================
+
+ÉTAPE 1 : UTILISATEUR POSTE UN SCORE
+────────────────────────────────────
+  Message Discord dans #scores-ft-congo :
+    "Leleo242 5 - 1 Toto99"
+
+ÉTAPE 2 : BOT DÉTECTE LE MESSAGE
+────────────────────────────────────
+  Fonction : bot.py → on_message(message)
+  
+  Vérifie :
+    ✓ Le bot n'est pas l'auteur (message.author.bot)
+    ✓ Le message est dans un salon #scores (is_scores_channel)
+    ✓ Le message n'est pas un robot Discord
+    ✓ Date > START_DATE
+
+ÉTAPE 3 : PARSER EXTRAIT LES SCORES
+────────────────────────────────────
+  Fonction : parser.py → parse_all_matches(content)
+  
+  Regex : (\d+)\s*-\s*(\d+)
+  
+  Extrait :
+    player1 = "Leleo242"
+    score1 = 5
+    score2 = 1
+    player2 = "Toto99"
+    ft_type = MAX(5, 1) = 5
+    winner_side = 1 (score1 > score2)
+  
+  Retour : list[ParsedMatch]
+
+ÉTAPE 4 : BOT SYNCHRONISE LES MATCHS
+────────────────────────────────────
+  Fonction : bot.py → _sync_message_scores_sync(message)
+  
+  4.1 Compare signature old vs new
+      old_signature = db.get_message_match_signature(message_id)
+      new_signature = parse_all_matches(message)
+      
+      Si identique → Retour (rien à faire)
+      Si changement → Supprime anciens matchs
+  
+  4.2 Détermine la région
+      score_region = self.get_score_region(message)
+      
+      Si message dans #scores-bz → "BZ"
+      Si message dans #scores-pn → "PN"
+      Si message dans #scores (générique) → None
+  
+  4.3 Crée les joueurs s'ils n'existent pas
+      player1 = db.get_or_create_player(parsed.player1, discord_id_1)
+      player2 = db.get_or_create_player(parsed.player2, discord_id_2)
+      
+      Cherche @mentions dans message.mentions
+      Essaie de matcher par nom Discord
+  
+  4.4 Attribue la région si salon régional
+      Si score_region in ["BZ", "PN"]:
+          db.set_player_region(player1["id"], score_region)
+          db.set_player_region(player2["id"], score_region)
+  
+  4.5 Insère le match
+      winner_id = player1["id"] si parsed.winner_side == 1 else player2["id"]
+      
+      db.insert_match(
+          message_id=message.id,
+          match_index=0,
+          season_id=season["id"],
+          player1_id=player1["id"],
+          player2_id=player2["id"],
+          score1=parsed.score1,
+          score2=parsed.score2,
+          ft_type=parsed.ft_type,
+          winner_id=winner_id,
+      )
+
+ÉTAPE 5 : POINTS ELO RECALCULÉS
+────────────────────────────────
+  Fonction : ranking.py → compute_match_elo_delta(ft_type, won)
+  
+  TABLE DE BONUS PAR FT :
+  ┌────────┬─────────┬──────────┐
+  │ FT     │ Victoire│ Défaite  │
+  ├────────┼─────────┼──────────┤
+  │ FT2    │ +25     │ -15      │
+  │ FT3    │ +27     │ -16.5    │
+  │ FT5    │ +30     │ -17.5    │
+  │ FT7    │ +33     │ -19      │
+  │ FT10   │ +37     │ -21      │
+  └────────┴─────────┴──────────┘
+  
+  Victoire  : +25 + BONUS[ft_type]
+  Défaite   : -15 - BONUS[ft_type]/2
+  
+  Base ELO ne descend jamais sous 0 (GREATEST(0, elo + delta))
+
+ÉTAPE 6 : MISE À JOUR AUTOMATIQUE
+────────────────────────────────────
+  Toutes les 180 secondes (config.AUTO_SYNC_SECONDS)
+  
+  Fonction : bot.py → _auto_sync_loop()
+  
+  1. Récupère tous les messages des salons #scores
+  2. Chaque message → vérifie signature
+  3. Si modification → resynchronise
+  4. Recalcule tous les points ELO
+  5. Récupère nouveau leaderboard
+  6. Format en texte Discord
+  7. UPDATE message(s) dans #classement
+
+================================================================================
+5. COMMANDES DISPONIBLES
+================================================================================
+
+COMMANDES POUR TOUS LES UTILISATEURS
+──────────────────────────────────────
+
+COMMANDE : /aide
+  DESCRIPTION : Guide rapide du bot
+  PARAMÈTRES : Aucun
+  RÉPONSE : Embed avec guide complet
+  EXEMPLE : /aide
+
+COMMANDE : /classement
+  DESCRIPTION : Classements officiels BZ + PN
+  PARAMÈTRES :
+    - date_debut (optionnel) : "AAAA-MM-JJ"
+    - date_fin (optionnel) : "AAAA-MM-JJ"
+  COMPORTEMENT :
+    • Si pas de dates → classement actif (< 14 jours de match)
+    • Si dates → classement sur la période donnée
+    • Affiche BZ puis PN (via /followup)
+  EXEMPLE : /classement
+  EXEMPLE : /classement date_debut:2026-05-01 date_fin:2026-06-07
+
+COMMANDE : /classement-bz
+  DESCRIPTION : Classement officiel BZ uniquement
+  PARAMÈTRES :
+    - date_debut (optionnel) : "AAAA-MM-JJ"
+    - date_fin (optionnel) : "AAAA-MM-JJ"
+  EXEMPLE : /classement-bz
+
+COMMANDE : /classement-pn
+  DESCRIPTION : Classement officiel PN uniquement
+  PARAMÈTRES :
+    - date_debut (optionnel) : "AAAA-MM-JJ"
+    - date_fin (optionnel) : "AAAA-MM-JJ"
+  EXEMPLE : /classement-pn
+
+COMMANDE : /stats
+  DESCRIPTION : Fiche complète d'un joueur
+  PARAMÈTRES :
+    - pseudo (requis) : Nom du joueur
+    - membre (optionnel) : @mention Discord (prioritaire)
+  COMPORTEMENT :
+    • Cherche d'abord par @mention
+    • Puis par pseudo
+    • Si trouvé : affiche fiche + historique
+    • Si pas trouvé : propose créer ou lier
+  AFFICHAGE :
+    - Nom + rang + région + points
+    - Victoires / défaites / taux %
+    - Détail par FT (2, 3, 5, 7, 10)
+    • Historique des 50 derniers matchs
+  EXEMPLE : /stats pseudo:Leleo242
+  EXEMPLE : /stats pseudo:Toto99 membre:@Toto
+
+COMMANDE : /compare
+  DESCRIPTION : Duel entre 2 joueurs (Head-to-Head)
+  PARAMÈTRES :
+    - joueur_a (requis) : Pseudo 1
+    - joueur_b (requis) : Pseudo 2
+  AFFICHAGE :
+    - Confrontations totales
+    - Qui a gagné combien de fois
+    - Détail par FT
+    - Derniers matchs entre eux
+  EXEMPLE : /compare joueur_a:Leleo242 joueur_b:Toto99
+
+COMMANDE : /link
+  DESCRIPTION : Lier un pseudo Discord à un compte Discord
+  PARAMÈTRES :
+    - pseudo (requis) : Nom du joueur
+    - membre (requis) : @mention Discord
+  COMPORTEMENT :
+    • Cherche le joueur par pseudo
+    • Si pas trouvé : crée + lie
+    • Si trouvé : lie au compte Discord
+  EXEMPLE : /link pseudo:Leleo242 membre:@Leleo
+
+────────────────────────────────────────────────────────────────
+
+COMMANDES ADMIN (rôle ADMIN_ROLE_ID)
+──────────────────────────────────────
+
+COMMANDE : /set-rang
+  PERMISSION : Admin (administrator, manage_guild, ou ADMIN_ROLE_ID)
+  DESCRIPTION : Attribuer un rang manuel à un joueur
+  PARAMÈTRES :
+    - rang (requis) : S+, S, A+, A, B+, B (liste déroulante)
+    - pseudo (optionnel) : Nom du joueur
+    - membre (optionnel) : @mention Discord (prioritaire)
+  COMPORTEMENT :
+    • Au moins l'un de pseudo ou membre requis
+    • Si trouvé : attribue rang + points de base
+    • rank_manual = 1 (ce rang persiste même si recalc)
+  POINTS DE BASE ATTRIBUÉS :
+    S+  → 2400
+    S   → 2200
+    A+  → 2000
+    A   → 1800
+    B+  → 1600
+    B   → 1400
+  EXEMPLE : /set-rang rang:S+ pseudo:Leleo242
+
+COMMANDE : /rang-attribuer
+  PERMISSION : Admin
+  DESCRIPTION : Menu pour attribuer les rangs en masse
+  PARAMÈTRES : Aucun
+  COMPORTEMENT :
+    • Affiche liste des joueurs
+    • Permet sélectionner plusieurs joueurs
+    • Puis choisir le rang à attribuer
+  EXEMPLE : /rang-attribuer
+
+COMMANDE : /region-definir
+  PERMISSION : Admin
+  DESCRIPTION : Attribuer région à 1 joueur
+  PARAMÈTRES :
+    - region (requis) : BZ ou PN
+    - pseudo (requis) : Nom du joueur
+  COMPORTEMENT :
+    • Cherche le joueur
+    • Set region = BZ ou PN
+  EXEMPLE : /region-definir region:BZ pseudo:Leleo242
+
+COMMANDE : /region-ajouter
+  PERMISSION : Admin
+  DESCRIPTION : Menu pour ajouter région à plusieurs joueurs
+  PARAMÈTRES :
+    - region (requis) : BZ ou PN
+  COMPORTEMENT :
+    • Affiche liste des joueurs
+    • Permet sélectionner plusieurs
+    • Set leur région = BZ/PN
+  EXEMPLE : /region-ajouter region:BZ
+
+COMMANDE : /region-retirer
+  PERMISSION : Admin
+  DESCRIPTION : Menu pour retirer région à plusieurs joueurs
+  PARAMÈTRES : Aucun
+  COMPORTEMENT :
+    • Affiche liste des joueurs
+    • Permet sélectionner plusieurs
+    • Set leur région = NULL
+  EXEMPLE : /region-retirer
+
+COMMANDE : /set-region
+  PERMISSION : Tous (l'utilisateur pour lui-même)
+  DESCRIPTION : L'utilisateur définit sa propre région
+  PARAMÈTRES :
+    - region (requis) : BZ ou PN
+  COMPORTEMENT :
+    • Cherche le joueur associé au compte Discord
+    • Set région = BZ/PN
+  EXEMPLE : /set-region region:BZ
+
+================================================================================
+6. SYSTÈME DE RANGS & ELO
+================================================================================
+
+HIÉRARCHIE DES RANGS
+──────────────────────
+
+Rang     | Points de base | Description
+─────────┼────────────────┼─────────────────────────
+S+       | 2400           | Meilleur tier
+S        | 2200           | Très bon
+A+       | 2000           | Bon
+A        | 1800           | Compétent
+B+       | 1600           | Intermédiaire
+B        | 1400           | Début/Régulier
+NR       | 1000           | Non Classé (défaut)
+
+SYSTÈME ELO
+────────────
+
+Un joueur a un ELO (points) qui varie selon ses matchs.
+
+POINTS DE BASE :
+  Base victoire : +25
+  Base défaite  : -15
+
+BONUS PAR TYPE FT :
+  FT2  : +0
+  FT3  : +2
+  FT5  : +5
+  FT7  : +8
+  FT10 : +12
+
+CALCUL COMPLET :
+  Victoire  = +25 + BONUS
+  Défaite   = -15 - (BONUS / 2)
+
+EXEMPLES :
+  FT5 Victoire  : +25 + 5   = +30
+  FT5 Défaite   : -15 - 2.5 = -17.5
+  FT10 Victoire : +25 + 12  = +37
+  FT10 Défaite  : -15 - 6   = -21
+
+RÈGLES :
+  • ELO jamais négatif (GREATEST(0, elo + delta))
+  • Rang manuel (rank_manual=1) reste fixe jusqu'à admin le change
+  • Rang auto (rank_manual=0) = peut être recalculé
+  • Points initiaux = points du tier attribué
+
+AFFICHAGE :
+  Dans les classements, ordre de tri :
+    1. Victoires DESC (plus haut = mieux)
+    2. Défaites ASC (moins = mieux)
+    3. Ratio points (points marqués / points concédés) DESC
+    4. ELO DESC
+    5. Pseudo alphabétique ASC
+
+================================================================================
+7. GESTION DES JOUEURS
+================================================================================
+
+CRÉATION AUTOMATIQUE
+──────────────────────
+
+Quand un score est posté avec un pseudo qui n'existe pas :
+
+1. Nettoie le nom :
+   - Supprime les annotations (texte entre parenthèses)
+   - Supprime les scores du nom
+   - Limite à 64 caractères
+   - Normalize : minuscules, sans "Le" devant
+
+2. Cherche le joueur par normalized_name
+   Si trouvé :
+     - Retour joueur existant
+   
+   Si pas trouvé :
+     - Crée nouveau joueur
+     - discord_id = null (sauf si mention trouvée)
+     - tier_rank = "NR"
+     - elo = 1000
+     - rank_manual = 0
+
+3. Essaie matcher avec @mention dans message
+   Si match trouvé :
+     - Set discord_id = mention.id
+
+EXEMPLE D'EXTRACTION :
+  Message : "Leleo242 5 - 1 Toto99"
+  
+  Brut      : "Leleo242"
+  Sanitized : "leleo242"
+  Display   : "Leleo242"
+  
+  En BD :
+    name = "Leleo242"
+    normalized_name = "leleo242"
+    discord_id = null (sauf si @mention trouvée)
+
+RÉSOLUTION DE JOUEUR
+──────────────────────
+
+Fonction : player_resolver.py → resolve_player_input(db, input, season_id)
+
+Cherche dans cet ordre :
+  1. Par mention Discord (@user)
+  2. Par normalized_name (exact match)
+  3. Par fuzzy match (similitude)
+  4. Si ambigu : affiche menu de sélection
+
+Retour : ResolveResult
+  - found (bool) : trouvé ou pas
+  - player (dict) : données du joueur ou null
+  - label (str) : affichage pour l'utilisateur
+  - search_text (str) : texte cherché
+
+LIEN DISCORD↔PSEUDO
+──────────────────────
+
+Permet de lier un compte Discord à un pseudo de joueur :
+
+AVANTAGES :
+  • Chercher joueur par @mention
+  • Attribuer rangs/régions par @mention
+  • Afficher le display name Discord
+
+FONCTIONS :
+  • db.link_discord_id(player_id, discord_id)
+  • db.get_player_by_discord_id(discord_id)
+
+EXEMPLE :
+  Avant : pseudo "Leleo242" sans lien
+  Après : /link pseudo:Leleo242 membre:@Leleo
+  → discord_id = 123456789
+
+MAINTENANT :
+  • /stats membre:@Leleo → trouve Leleo242
+  • /set-rang rang:S+ membre:@Leleo → met à jour S+
+
+================================================================================
+8. SYNCHRONISATION AUTOMATIQUE
+================================================================================
+
+BOUCLE AUTO-SYNC
+─────────────────
+
+Lancée au démarrage du bot, tourne indéfiniment.
+
+Fonction : bot.py → _auto_sync_loop()
+
+PSEUDO-CODE :
+  while True:
+    sleep(AUTO_SYNC_SECONDS)  # 180 sec par défaut
+    try:
+      await sync_all_guilds(quiet=True)
+    except Exception:
+      logger.exception("Erreur sync")
+
+COMPORTEMENT LORS DE LA SYNC
+──────────────────────────────
+
+Pour chaque serveur Discord (guild) :
+  
+  1. Récupère tous les messages des salons #scores
+     - Si SCORES_CHANNEL_BZ défini → inclut ce salon
+     - Si SCORES_CHANNEL_PN défini → inclut ce salon
+     - Si SCORES_CHANNEL défini → inclut ce salon
+  
+  2. Pour chaque message :
+     - Récupère sa signature BD (anciens matchs)
+     - Parse le contenu actuel
+     - Compare signatures
+     
+     Si changement :
+       - Supprime anciens matchs
+       - Enregistre nouveaux matchs
+       - Recalcule les points ELO
+  
+  3. Récupère le leaderboard mis à jour
+  
+  4. Récupère ou crée le message de classement dans #classement
+  
+  5. UPDATE le message avec le nouveau classement
+  
+  6. Log les infos (nombre de matchs synced, etc)
+
+RÉSULTAT :
+  ✓ Classement toujours à jour
+  ✓ Même si scores modifiés
+  ✓ Même si bot redémarré
+  ✓ Même si nouvelle saison
+
+STOCKAGE DES IDS DE MESSAGES
+──────────────────────────────
+
+Les IDs des messages de classement sont stockés dans bot_settings :
+
+Clé : leaderboard_message_ids_GUILD_ID
+Valeur : "ID1,ID2,ID3"
+
+Permet de mettre à jour plusieurs messages de classement.
+
+EXEMPLE :
+  leaderboard_message_ids_123456789 = "987654321,987654322"
+  → Met à jour 2 messages
+
+================================================================================
+9. CONFIGURATION
+================================================================================
+
+FICHIER .env (À CRÉER)
+────────────────────────
+
+# DISCORD BOT
+DISCORD_TOKEN=votre_token_ici
+GUILD_ID=123456789             # ID du serveur Discord
+ADMIN_ROLE_ID=987654321        # Optionnel, ID du rôle admin
+
+# MYSQL
+MYSQL_HOST=localhost            # ou 127.0.0.1
+MYSQL_PORT=3306                 # Port par défaut
+MYSQL_USER=root                 # Utilisateur
+MYSQL_PASSWORD=votre_password   # Mot de passe
+MYSQL_DATABASE=ft_championship  # Nom de la base
+
+# SALONS DISCORD
+SCORES_CHANNEL=scores-ft-congo      # Salon générique (pas de région auto)
+SCORES_CHANNEL_BZ=scores-bz         # Salon BZ (ajoute région=BZ auto)
+SCORES_CHANNEL_PN=scores-pn         # Salon PN (ajoute région=PN auto)
+LEADERBOARD_CHANNEL=classement      # Salon pour mettre à jour classement
+
+# BOT COMPORTEMENT
+START_DATE=2026-01-01          # Date de démarrage de la saison
+ACTIVE_DAYS=14                 # Joueurs actifs si match < 14 jours
+AUTO_SYNC_SECONDS=180          # Sync auto toutes les 3 min
+
+# LOGS
+LOG_LEVEL=INFO                 # DEBUG, INFO, WARNING, ERROR
+LOG_TO_FILE=false              # true = crée bot.log
+LOG_FILE=bot.log               # Chemin du fichier log
+
+VARIABLES IMPORTANTES
+──────────────────────
+
+DISCORD_TOKEN
+  - Token du bot Discord
+  - Disponible dans Developer Portal
+  - JAMAIS committer en versionning
+  - RÉGÉNÉRER si exposé
+
+GUILD_ID
+  - ID du serveur Discord principal
+  - Si défini : commandes synchronisées instantanément
+  - Si vide : sync globale (peut prendre 1h)
+
+MYSQL_*
+  - Configuration de la base de données
+  - La base ft_championship est créée automatiquement
+  - Les tables sont créées automatiquement
+
+SCORES_CHANNEL*
+  - Noms des salons (sans #)
+  - Case-insensitive
+  - Optionnels : si non défini, pas écouté
+
+START_DATE
+  - Date de début de la saison
+  - Format : AAAA-MM-JJ
+  - Les matchs avant cette date sont ignorés
+
+ACTIVE_DAYS
+  - Définit qui est "actif" dans le classement
+  - Un joueur est actif s'il a joué < N jours
+  - Affecte le filtre du classement (si active_only=True)
+
+AUTO_SYNC_SECONDS
+  - Intervalle de synchronisation automatique
+  - 180 = toutes les 3 minutes
+  - Plus petit = plus de requêtes BD
+  - Plus grand = moins de réactivité
+
+VALEURS PAR DÉFAUT (config.py)
+────────────────────────────────
+
+FT_TYPES = (2, 3, 5, 7, 10)
+VALID_REGIONS = ("BZ", "PN")
+VALID_TIERS = ("S+", "S", "A+", "A", "B+", "B", "NR")
+
+MESSAGES REQUIS (discord.py Intents)
+──────────────────────────────────────
+
+Bot necessite :
+  • message_content = True        (lire contenu des messages)
+  • messages = True               (recevoir événements messages)
+  • members = True                (lire info des membres)
+  • guilds = True                 (lire info des serveurs)
+
+À activer dans Developer Portal sous "Privileged Gateway Intents"
+
+================================================================================
+10. DÉPLOIEMENT
+================================================================================
+
+PRÉREQUIS GLOBAUX
+───────────────────
+
+Avant tout déploiement :
+  • Python 3.12+ (vérifier : python --version)
+  • MySQL 8.0+ (local ou distant)
+  • Token Discord (Developer Portal)
+  • Permissions bot : MESSAGE_CONTENT, VIEW_CHANNEL, SEND_MESSAGES, etc
+  • Fichier .env configuré
+
+──────────────────────────────────────────────────────────────
+
+DÉPLOIEMENT WINDOWS LOCAL
+──────────────────────────
+
+ÉTAPE 1 : Cloner le repo
+  git clone https://github.com/CG242/bot-onpg-discord.git
+  cd bot-onpg-discord
+
+ÉTAPE 2 : Copier le fichier .env
+  copy .env.example .env
+  # Éditer .env avec vos valeurs
+
+ÉTAPE 3 : Installer les dépendances
+  Méthode 1 (via setup.bat) :
+    setup.bat
+  
+  Méthode 2 (manuel) :
+    python -m venv venv
+    venv\Scripts\activate
+    pip install -r requirements.txt
+
+ÉTAPE 4 : Initialiser la base de données
+  python scripts/setup_db.py
+  # Crée la base ft_championship
+
+ÉTAPE 5 : Lancer le bot
+  Méthode 1 (via run.bat) :
+    run.bat
+  
+  Méthode 2 (manuel) :
+    python bot.py
+
+VÉRIFICATION :
+  • Message "Connecté en tant que NOM_BOT"
+  • Pas d'erreur MySQL
+  • Message "Commandes synchronisées"
+
+──────────────────────────────────────────────────────────────
+
+DÉPLOIEMENT DOCKER (RECOMMANDÉ PROD)
+──────────────────────────────────────
+
+ÉTAPE 1 : Prérequis
+  • Docker Desktop (ou Docker + Docker Compose)
+  • Vérifier : docker --version && docker compose --version
+
+ÉTAPE 2 : Préparer la config
+  cp .env.example .env
+  # Éditer .env avec vos valeurs
+  # Important : MYSQL_PASSWORD pour la base MySQL du container
+
+ÉTAPE 3 : Build et démarrage
+  docker compose up -d --build
+  
+  Cela va :
+    • Créer image MySQL
+    • Créer image Bot
+    • Démarrer les deux containers
+    • Créer volume MySQL (persistant)
+
+ÉTAPE 4 : Vérifier les logs
+  docker compose logs -f bot
+  
+  Chercher :
+    ✓ "Connecté en tant que"
+    ✓ "Commandes synchronisées"
+    ✓ Pas d'erreur MySQL
+
+ÉTAPE 5 : Arrêter le bot
+  docker compose down
+  
+  Ou en gardant la base :
+  docker compose down -v  # -v = supprime volumes
+
+COMMANDES DOCKER UTILES
+  docker compose ps                    # Vérifier les containers
+  docker compose logs -f bot           # Logs du bot
+  docker compose logs -f mysql         # Logs MySQL
+  docker compose exec bot /bin/bash    # Shell du container
+  docker compose restart bot           # Redémarrer le bot
+  docker compose up -d --build         # Rebuild et démarrer
+
+──────────────────────────────────────────────────────────────
+
+DÉPLOIEMENT LINUX/VPS (SANS DOCKER)
+──────────────────────────────────────
+
+PRÉREQUIS :
+  • Ubuntu 20+ (ou autre Linux)
+  • Python 3.12
+  • MySQL 8.0
+  • git
+
+ÉTAPE 1 : Cloner et installer
+  git clone https://github.com/CG242/bot-onpg-discord.git
+  cd bot-onpg-discord
+  cp .env.example .env
+  nano .env                          # Éditer config
+  
+  chmod +x scripts/deploy.sh run.sh
+  ./scripts/deploy.sh               # Auto-installe dépendances
+
+ÉTAPE 2 : Initialiser la base
+  python scripts/setup_db.py
+
+ÉTAPE 3 : Lancer le bot
+  ./run.sh                           # Lance en foreground
+
+ÉTAPE 4 : Configurer comme service (auto-redémarrage)
+  sudo cp scripts/bot-onpg.service /etc/systemd/system/
+  sudo systemctl daemon-reload
+  sudo systemctl enable --now bot-onpg
+  
+  Vérifier :
+    sudo systemctl status bot-onpg
+  
+  Logs :
+    sudo journalctl -u bot-onpg -f
+
+COMMANDES SYSTEMD
+  sudo systemctl start bot-onpg      # Démarrer
+  sudo systemctl stop bot-onpg       # Arrêter
+  sudo systemctl restart bot-onpg    # Redémarrer
+  sudo systemctl enable bot-onpg     # Auto-démarrage
+  sudo systemctl disable bot-onpg    # Désactiver auto-démarrage
+  sudo journalctl -u bot-onpg -n 100 # Derniers 100 logs
+
+──────────────────────────────────────────────────────────────
+
+VÉRIFICATION DE SANTÉ
+──────────────────────
+
+Après déploiement, vérifier :
+
+1. Bot connecté
+   Chercher : "Connecté en tant que" dans les logs
+   
+2. Commandes synchronisées
+   Chercher : "Commandes synchronisées"
+   
+3. Base de données opérationnelle
+   Vérifier : mysql -u root -p -e "USE ft_championship; SHOW TABLES;"
+   Doit afficher : seasons, players, matches, bot_settings
+   
+4. Logs de sync
+   Lancer : /classement
+   Chercher dans logs : "Leaderboard mise à jour"
+   
+5. Vérifier un score
+   Poster dans #scores : "Test 5 - 1 Bot"
+   Attendre 3 min (AUTO_SYNC_SECONDS)
+   Vérifier dans /stats que le match est enregistré
+
+================================================================================
+11. CORRECTION DE BUGS
+================================================================================
+
+BUG CORRIGÉ : MySQL 1247 - "Reference not supported"
+────────────────────────────────────────────────────
+
+SYMPTÔME :
+  mysql.connector.errors.ProgrammingError: 1247 (42S22)
+  Reference 'loss_points_scored' not supported
+  (reference to group function)
+
+CAUSE :
+  La requête SQL utilisait une expression complexe dans ORDER BY
+  avec des alias d'agrégation (SUM) et GROUP BY
+  
+  Code problématique :
+  ORDER BY
+      ft_wins DESC,
+      ft_losses ASC,
+      (loss_points_scored / GREATEST(loss_points_conceded, 1)) DESC,  ❌
+      elo DESC,
+      normalized_name ASC
+
+EXPLICATION TECHNIQUE :
+  • MySQL refuse d'utiliser une expression avec alias d'agrégation
+    directement dans ORDER BY quand un GROUP BY existe
+  • loss_points_scored = SUM(...) alias
+  • loss_points_conceded = SUM(...) alias
+  • On ne peut pas diviser deux alias d'agrégation en ORDER BY
+
+SOLUTION :
+  Utiliser une sous-requête pour que les agrégations soient calculées
+  AVANT l'ORDER BY
+  
+  Code corrigé :
+  SELECT ... FROM (
+      SELECT
+          p.id,
+          ...
+          SUM(...) AS loss_points_scored,
+          SUM(...) AS loss_points_conceded
+      FROM matches m
+      JOIN players p ...
+      GROUP BY ...
+  ) AS leaderboard
+  ORDER BY
+      ft_wins DESC,
+      ft_losses ASC,
+      (loss_points_scored / GREATEST(loss_points_conceded, 1)) DESC,  ✓
+      elo DESC,
+      normalized_name ASC
+
+COMMIT GIT :
+  48fe4f2 - "fix(database): corrige erreur MySQL 1247..."
+  Fichier : database.py → get_leaderboard()
+
+VÉRIFICATION :
+  Après correction, le bot démarre sans erreur.
+  /classement affiche le leaderboard normalement.
+
+================================================================================
+12. STRUCTURE DES FICHIERS
+================================================================================
+
+.
+├── bot.py                    Main : démarrage du bot
+├── commands.py               Commandes slash (/)
+├── database.py               Interface MySQL
+├── parser.py                 Parsing des scores
+├── ranking.py                Système ELO/tiers
+├── stats.py                  Formatage des statistiques
+├── views.py                  UI Discord (boutons, menus)
+├── player_resolver.py        Recherche de joueurs
+├── config.py                 Configuration globale
+├── requirements.txt          Dépendances Python
+├── .env.example              Template .env (à copier)
+├── Dockerfile                Image Docker pour le bot
+├── docker-compose.yml        Orchestration Docker
+├── run.bat                   Script démarrage Windows
+├── run.sh                    Script démarrage Linux
+├── setup.bat                 Installation Windows
+├── init_db.sql               Script init MySQL (legacy)
+│
+├── scripts/
+│   ├── deploy.sh             Déploiement Linux
+│   ├── setup_db.py           Init base de données
+│   └── bot-onpg.service      Service systemd Linux
+│
+├── README.md                 Documentation rapide
+└── DOCUMENTATION_COMPLETE.txt Ce fichier
+
+DÉPENDANCES PRINCIPALES (requirements.txt)
+─────────────────────────────────────────────
+
+discord.py == 2.x              # Bot Discord
+mysql-connector-python         # Connecteur MySQL
+python-dotenv                  # Charger .env
+
+FICHIERS CRITIQUES
+────────────────────
+
+bot.py         → Cœur du bot, logique principale
+database.py    → Requêtes SQL, toutes les opérations BD
+commands.py    → Toutes les commandes Discord
+
+Ces 3 fichiers contiennent 95% de la logique.
+
+FICHIERS DE CONFIG
+────────────────────
+
+.env             → Configuration runtime (NE PAS COMMITTER)
+config.py        → Constantes et charge .env
+docker-compose.yml → Config Docker
+
+================================================================================
+RÉSUMÉ DES POINTS CLÉS
+================================================================================
+
+1. AUTOMATISATION
+   • Scores parsés automatiquement depuis les messages
+   • Classements mis à jour toutes les 3 min
+   • Pas d'intervention manuelle requise
+
+2. SYSTÈME RÉGIONAL
+   • Deux régions : BZ et PN
+   • Salons séparés par région
+   • Classements filtrés par région
+
+3. SYSTÈME DE RANGS
+   • 7 tiers (S+ à NR)
+   • Chaque tier = points de base
+   • Admin peut fixer le rang (rank_manual)
+
+4. SYSTÈME ELO
+   • Points varient selon les victoires/défaites
+   • Bonus selon le type FT (5 types)
+   • Classement basé sur victoires, défaites, ratio, ELO
+
+5. GESTION DES JOUEURS
+   • Création automatique depuis les scores
+   • Lien optionnel avec compte Discord
+   • Résolution floue (fuzzy matching)
+
+6. BASE DE DONNÉES
+   • 4 tables (seasons, players, matches, bot_settings)
+   • Migrations automatiques au démarrage
+   • Indices pour performance
+
+7. DÉPLOIEMENT
+   • Local, Docker, ou Linux/VPS
+   • Configuration par .env
+   • Logs en console ou fichier
+
+================================================================================
+FIN DE LA DOCUMENTATION
+================================================================================
+
+Document créé : 07/06/2026
+Version : 1.0
+Auteur : Équipe développement ONPG
+
+Pour des questions, consulter :
+  • Dépôt GitHub : https://github.com/CG242/bot-onpg-discord
+  • README.md pour guide rapide
+  • Code source : commentaires en français
+
