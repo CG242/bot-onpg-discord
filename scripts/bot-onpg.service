@@ -1,0 +1,18 @@
+[Unit]
+Description=Bot Discord FT Championship ONPG
+After=network.target mysql.service docker.service
+Wants=mysql.service
+
+[Service]
+Type=simple
+User=www-data
+WorkingDirectory=/opt/bot-onpg-discord
+EnvironmentFile=/opt/bot-onpg-discord/.env
+ExecStart=/opt/bot-onpg-discord/.venv/bin/python bot.py
+Restart=always
+RestartSec=10
+# Pas de logs fichier — journal systemd uniquement
+Environment=LOG_TO_FILE=false
+
+[Install]
+WantedBy=multi-user.target
