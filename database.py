@@ -591,52 +591,67 @@ class Database:
             cursor.execute(
                 f"""
                 SELECT
-                    p.id,
-                    p.name,
-                    p.normalized_name,
-                    p.discord_id,
-                    p.region,
-                    p.tier_rank,
-                    p.elo,
-                    MAX(m.created_at) AS last_match_at,
-                    SUM(CASE WHEN m.winner_id = p.id THEN 1 ELSE 0 END) AS ft_wins,
-                    SUM(
-                        CASE
-                            WHEN m.winner_id != p.id
-                             AND (m.player1_id = p.id OR m.player2_id = p.id)
-                            THEN 1 ELSE 0
-                        END
-                    ) AS ft_losses,
-                    SUM(
-                        CASE
-                            WHEN m.winner_id != p.id
-                             AND (m.player1_id = p.id OR m.player2_id = p.id)
-                            THEN CASE WHEN m.player1_id = p.id THEN m.score1 ELSE m.score2 END
-                            ELSE 0
-                        END
-                    ) AS loss_points_scored,
-                    SUM(
-                        CASE
-                            WHEN m.winner_id != p.id
-                             AND (m.player1_id = p.id OR m.player2_id = p.id)
-                            THEN CASE WHEN m.player1_id = p.id THEN m.score2 ELSE m.score1 END
-                            ELSE 0
-                        END
-                    ) AS loss_points_conceded
-                FROM matches m
-                JOIN players p ON p.id IN (m.player1_id, m.player2_id)
-                WHERE m.season_id = %s
-                {region_filter}
-                {date_filter}
-                GROUP BY p.id, p.name, p.normalized_name, p.discord_id,
-                         p.region, p.tier_rank, p.elo
-                {active_filter}
+                    id,
+                    name,
+                    normalized_name,
+                    discord_id,
+                    region,
+                    tier_rank,
+                    elo,
+                    last_match_at,
+                    ft_wins,
+                    ft_losses,
+                    loss_points_scored,
+                    loss_points_conceded
+                FROM (
+                    SELECT
+                        p.id,
+                        p.name,
+                        p.normalized_name,
+                        p.discord_id,
+                        p.region,
+                        p.tier_rank,
+                        p.elo,
+                        MAX(m.created_at) AS last_match_at,
+                        SUM(CASE WHEN m.winner_id = p.id THEN 1 ELSE 0 END) AS ft_wins,
+                        SUM(
+                            CASE
+                                WHEN m.winner_id != p.id
+                                 AND (m.player1_id = p.id OR m.player2_id = p.id)
+                                THEN 1 ELSE 0
+                            END
+                        ) AS ft_losses,
+                        SUM(
+                            CASE
+                                WHEN m.winner_id != p.id
+                                 AND (m.player1_id = p.id OR m.player2_id = p.id)
+                                THEN CASE WHEN m.player1_id = p.id THEN m.score1 ELSE m.score2 END
+                                ELSE 0
+                            END
+                        ) AS loss_points_scored,
+                        SUM(
+                            CASE
+                                WHEN m.winner_id != p.id
+                                 AND (m.player1_id = p.id OR m.player2_id = p.id)
+                                THEN CASE WHEN m.player1_id = p.id THEN m.score2 ELSE m.score1 END
+                                ELSE 0
+                            END
+                        ) AS loss_points_conceded
+                    FROM matches m
+                    JOIN players p ON p.id IN (m.player1_id, m.player2_id)
+                    WHERE m.season_id = %s
+                    {region_filter}
+                    {date_filter}
+                    GROUP BY p.id, p.name, p.normalized_name, p.discord_id,
+                             p.region, p.tier_rank, p.elo
+                    {active_filter}
+                ) AS leaderboard
                 ORDER BY
                     ft_wins DESC,
                     ft_losses ASC,
                     (loss_points_scored / GREATEST(loss_points_conceded, 1)) DESC,
-                    p.elo DESC,
-                    p.normalized_name ASC
+                    elo DESC,
+                    normalized_name ASC
                 """,
                 tuple(params),
             )
