@@ -11,7 +11,6 @@ from player_resolver import (
     format_ambiguous_players,
     resolve_player_input,
 )
-from ranking import format_tier
 from stats import (
     format_comparison,
     format_inter_region_leaderboard,
@@ -22,7 +21,7 @@ from views import (
     ArchivedSeasonView,
     FusionManageView,
     PlayerNotFoundView,
-    RankManageView,
+    RankTierPickView,
     RegionManageView,
     SeasonNewConfirmView,
 )
@@ -30,15 +29,6 @@ from views import (
 logger = logging.getLogger(__name__)
 
 MSG_LIMIT = 2000
-
-TIER_CHOICES = [
-    app_commands.Choice(name=t, value=t)
-    for t in config.VALID_TIERS
-    if t != "NR"
-]
-FILTRE_RANG_CHOICES = [
-    app_commands.Choice(name="Tous les joueurs", value="tous"),
-] + [app_commands.Choice(name=f"Rang actuel : {t}", value=t) for t in config.VALID_TIERS]
 
 
 def _split_message(text: str, limit: int = 1990) -> list[str]:
@@ -184,7 +174,7 @@ def build_aide_embed() -> discord.Embed:
     embed.add_field(
         name="Administration",
         value=(
-            "`/set-rang` · `/region` · `/fusion-joueur`\n"
+            "`/rang-attribuer` · `/region` · `/fusion-joueur`\n"
             "`/export-donnees` · `/telechargement-donnees`\n"
             "`/recuperation-scores-2026` · `/classement-bz-pn`\n"
             "`/saison-nouvelle` · `/reset-saison` · `/backup` · `/restore`"
@@ -389,82 +379,27 @@ def setup_commands(tree: app_commands.CommandTree, db: Database) -> None:
         )
 
     @tree.command(
-        name="set-rang",
-        description="[Admin] Attribuer un rang (un joueur ou sélection multiple)",
+        name="rang-attribuer",
+        description="[Admin] Attribuer un rang à un ou plusieurs joueurs",
     )
-    @app_commands.describe(
-        rang="Rang à attribuer (S+, S, A+, A, B+, B)",
-        pseudo="Un seul joueur par pseudo",
-        membre="Un seul membre Discord",
-        filtre="En mode groupe : filtrer par rang actuel",
-    )
-    @app_commands.choices(rang=TIER_CHOICES, filtre=FILTRE_RANG_CHOICES)
-    async def set_rang_cmd(
-        interaction: discord.Interaction,
-        rang: app_commands.Choice[str],
-        pseudo: str | None = None,
-        membre: discord.Member | None = None,
-        filtre: app_commands.Choice[str] | None = None,
-    ):
+    async def rang_attribuer_cmd(interaction: discord.Interaction):
         if not is_admin(interaction):
             await send_reply(interaction, "Permission refusée.", ephemeral=True)
             return
 
-        season = db.get_active_season()
-        target = membre if membre else pseudo
-
-        if target:
-            player, label = _resolve(target, db, season["id"] if season else None)
-            if not player:
-                res = resolve_player_input(
-                    db, target, season["id"] if season else None
-                )
-                if res.ambiguous:
-                    await send_reply(
-                        interaction,
-                        format_ambiguous_players(db, res.candidates),
-                        ephemeral=True,
-                    )
-                    return
-                await send_reply(
-                    interaction, f"Joueur introuvable : **{label}**", ephemeral=True
-                )
-                return
-            pts = db.set_player_rank(player["id"], rang.value, manual=True)
-            await send_reply(
-                interaction,
-                f"**{db.player_display_name(player)}** → rang `{rang.value}` "
-                f"· **{pts}** points",
-                ephemeral=True,
-            )
-            await _refresh_leaderboard(interaction)
-            return
-
-        filter_val = filtre.value if filtre else "tous"
-        if filter_val == "tous":
-            players = db.list_all_players()
-            filter_label = "tous"
-        else:
-            players = db.list_players_by_tier(filter_val)
-            filter_label = filter_val
-
+        players = db.list_all_players()
         if not players:
             await send_reply(
-                interaction,
-                f"Aucun joueur avec le filtre **{filter_label}**.",
-                ephemeral=True,
+                interaction, "Aucun joueur enregistré.", ephemeral=True
             )
             return
 
-        view = RankManageView(
-            db, players, rang.value, interaction.user.id, filter_tier=filter_label
-        )
+        view = RankTierPickView(db, players, interaction.user.id)
         await send_reply(
             interaction,
-            f"**Attribution rang `{rang.value}`** — {len(players)} joueur(s)\n"
-            f"Filtre : **{filter_label}**\n"
-            "1. Multi-sélectionnez les joueurs (ou **Toute la page**)\n"
-            f"2. Cliquez **Attribuer {rang.value}**",
+            f"**Attribution des rangs** — {len(players)} joueur(s)\n"
+            "**Étape 1 :** choisissez le rang (S+, S, A+, A, B+, B, NR)\n"
+            "**Étape 2 :** sélectionnez les joueurs puis confirmez",
             ephemeral=True,
             view=view,
         )
@@ -487,9 +422,10 @@ def setup_commands(tree: app_commands.CommandTree, db: Database) -> None:
         await send_reply(
             interaction,
             f"**Fusion de joueurs** — {len(players)} joueur(s)\n"
-            "1. **Joueur à GARDER** (profil conservé)\n"
-            "2. **Joueur à FUSIONNER** (supprimé, matchs transférés)\n"
-            "3. **Confirmer fusion**",
+            "1. Menu **Joueur à GARDER** (profil conservé)\n"
+            "2. Menu **Joueur à FUSIONNER** (supprimé, matchs transférés)\n"
+            "3. **Confirmer fusion**\n"
+            "Garder : **—** · Fusionner : **—**",
             ephemeral=True,
             view=view,
         )
