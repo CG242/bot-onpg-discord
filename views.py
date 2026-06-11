@@ -168,107 +168,41 @@ class ArchivedSeasonView(discord.ui.View):
         self.add_item(ArchivedSeasonSelect(db, seasons, requester_id))
 
 
-class RegionSelectView(discord.ui.View):
-    """Première étape : choisir la région (BZ ou PN)."""
-
-    def __init__(self, db: Database, requester_id: int):
-        super().__init__(timeout=180)
-        self.db = db
-        self.requester_id = requester_id
-
-    async def _run_checks(self, interaction: discord.Interaction) -> bool:
-        """Override to fix AttributeError in newer discord.py versions."""
-        return await self.interaction_check(interaction)
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.requester_id:
-            await interaction.response.send_message(
-                "Cette action ne vous concerne pas.", ephemeral=True
-            )
-            return False
-        return True
-
-    @discord.ui.button(label="BZ", style=discord.ButtonStyle.primary, row=0)
-    async def select_bz(self, interaction: discord.Interaction, button: discord.ui.Button):
-        players = self.db.list_all_players()
-        if not players:
-            await interaction.response.send_message(
-                "Aucun joueur enregistré.", ephemeral=True
-            )
-            return
-        view = PlayerAssignView(self.db, players, "BZ", self.requester_id)
-        await interaction.response.edit_message(
-            content=f"**Région BZ** — Sélectionnez les joueurs à assigner :",
-            view=view,
-        )
-
-    @discord.ui.button(label="PN", style=discord.ButtonStyle.primary, row=0)
-    async def select_pn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        players = self.db.list_all_players()
-        if not players:
-            await interaction.response.send_message(
-                "Aucun joueur enregistré.", ephemeral=True
-            )
-            return
-        view = PlayerAssignView(self.db, players, "PN", self.requester_id)
-        await interaction.response.edit_message(
-            content=f"**Région PN** — Sélectionnez les joueurs à assigner :",
-            view=view,
-        )
-
-    @discord.ui.button(label="Annuler", style=discord.ButtonStyle.red, row=0)
-    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(content="Annulé.", view=None)
-
-
-class PlayerAssignView(discord.ui.View):
-    """Sélection des joueurs pour une région donnée."""
+class RegionManageView(discord.ui.View):
+    """Sélection joueur + boutons BZ / PN / Retirer."""
 
     def __init__(
         self,
         db: Database,
         players: list[dict],
-        region: str,
         requester_id: int,
         *,
         page: int = 0,
     ):
         super().__init__(timeout=180)
         self.db = db
-        self.region = region
         self.requester_id = requester_id
         self.all_players = players
         self.page = page
-        self.selected_player_ids: set[int] = set()
+        self.selected_player_id: int | None = None
         self._build_items()
 
-    async def _run_checks(self, interaction: discord.Interaction) -> bool:
-        """Override to fix AttributeError in newer discord.py versions."""
-        return await self.interaction_check(interaction)
-
     def _page_players(self) -> list[dict]:
-        start = self.page * 8
-        return self.all_players[start : start + 8]
+        start = self.page * 25
+        return self.all_players[start : start + 25]
 
     def _build_items(self) -> None:
         chunk = self._page_players()
-        for idx, player in enumerate(chunk):
-            name = self.db.player_display_name(player)
-            reg = (player.get("region") or "—").upper()
-            button = _PlayerAssignButton(
-                f"{name} ({reg})", player["id"], self, row=idx // 2
-            )
-            self.add_item(button)
-        
-        total_pages = max(1, (len(self.all_players) + 7) // 8)
-        nav_row = 4
+        if chunk:
+            self.add_item(_RegionPlayerPickSelect(chunk, self))
+        total_pages = max(1, (len(self.all_players) + 24) // 25)
         if self.page > 0:
-            self.add_item(_PageButton("◀ Précédent", self.page - 1, self, row=nav_row))
+            self.add_item(_RegionPageButton("◀ Précédent", self.page - 1, self))
         if self.page + 1 < total_pages:
-            self.add_item(_PageButton("Suivant ▶", self.page + 1, self, row=nav_row))
-        
-        self.add_item(_ConfirmAssignButton(self.region, self, row=nav_row))
-        self.add_item(_BackButton(self, row=nav_row))
+            self.add_item(_RegionPageButton("Suivant ▶", self.page + 1, self))
+        self.add_item(_RegionActionButton("BZ", "BZ", self))
+        self.add_item(_RegionActionButton("PN", "PN", self))
+        self.add_item(_RegionActionButton("Retirer région", None, self))
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.requester_id:
@@ -278,93 +212,440 @@ class PlayerAssignView(discord.ui.View):
             return False
         return True
 
-    def toggle_player(self, player_id: int) -> None:
-        if player_id in self.selected_player_ids:
-            self.selected_player_ids.remove(player_id)
-        else:
-            self.selected_player_ids.add(player_id)
-
-    async def confirm(self, interaction: discord.Interaction) -> None:
-        if not self.selected_player_ids:
+    async def apply_region(
+        self, interaction: discord.Interaction, region: str | None
+    ) -> None:
+        if not self.selected_player_id:
             await interaction.response.send_message(
-                "Aucun joueur sélectionné.", ephemeral=True
+                "Sélectionnez d'abord un joueur dans le menu.", ephemeral=True
             )
             return
-        
-        updated_count = 0
-        for player_id in self.selected_player_ids:
-            self.db.set_player_region(player_id, self.region)
-            updated_count += 1
-        
-        msg = f"**{updated_count}** joueur(s) → région **{self.region}**."
-        
-        # Retourner au menu de sélection de région
-        view = RegionSelectView(self.db, self.requester_id)
-        await interaction.response.edit_message(
-            content=f"{msg}\n\nChoisissez une autre région ou annulez :",
-            view=view,
-        )
+        player = self.db.get_player_by_id(self.selected_player_id)
+        if not player:
+            await interaction.response.send_message(
+                "Joueur introuvable.", ephemeral=True
+            )
+            return
+        name = self.db.player_display_name(player)
+        if region:
+            self.db.set_player_region(self.selected_player_id, region)
+            msg = f"**{name}** → région **{region}**."
+        else:
+            self.db.clear_player_region(self.selected_player_id)
+            msg = f"Région retirée pour **{name}**."
+        await interaction.response.edit_message(content=msg, view=None)
         bot = interaction.client
         if interaction.guild and hasattr(bot, "update_leaderboard_message"):
             await bot.update_leaderboard_message(interaction.guild)
 
-    async def go_back(self, interaction: discord.Interaction) -> None:
-        view = RegionSelectView(self.db, self.requester_id)
-        await interaction.response.edit_message(
-            content="Choisissez une région (BZ ou PN) :",
-            view=view,
+
+class _RegionActionButton(discord.ui.Button):
+    def __init__(self, label: str, region: str | None, parent: RegionManageView):
+        style = (
+            discord.ButtonStyle.secondary
+            if region is None
+            else discord.ButtonStyle.primary
+        )
+        super().__init__(label=label, style=style, row=2)
+        self._region = region
+        self._parent = parent
+
+    async def callback(self, interaction: discord.Interaction):
+        await self._parent.apply_region(interaction, self._region)
+
+
+class _RegionPlayerPickSelect(discord.ui.Select):
+    def __init__(self, players: list[dict], parent: RegionManageView):
+        self._parent = parent
+        db = parent.db
+        options = []
+        for p in players:
+            name = db.player_display_name(p)
+            reg = (p.get("region") or "—").upper()
+            options.append(
+                discord.SelectOption(
+                    label=name[:100],
+                    value=str(p["id"]),
+                    description=f"Région actuelle : {reg}"[:100],
+                )
+            )
+        super().__init__(
+            placeholder="Choisir un joueur…",
+            min_values=1,
+            max_values=1,
+            options=options,
+            row=0,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        self._parent.selected_player_id = int(self.values[0])
+        player = self._parent.db.get_player_by_id(self._parent.selected_player_id)
+        name = self._parent.db.player_display_name(player) if player else "?"
+        reg = (player.get("region") or "aucune").upper() if player else "—"
+        await interaction.response.send_message(
+            f"**{name}** sélectionné (région : {reg}).\n"
+            "Cliquez **BZ**, **PN** ou **Retirer région**.",
+            ephemeral=True,
         )
 
 
-class _PlayerAssignButton(discord.ui.Button):
-    def __init__(self, label: str, player_id: int, parent: PlayerAssignView, row: int):
-        super().__init__(label=label, style=discord.ButtonStyle.secondary, row=row)
-        self.player_id = player_id
-        self._parent = parent
-
-    async def callback(self, interaction: discord.Interaction):
-        self._parent.toggle_player(self.player_id)
-        # Mettre à jour le style pour montrer la sélection
-        if self.player_id in self._parent.selected_player_ids:
-            self.style = discord.ButtonStyle.success
-        else:
-            self.style = discord.ButtonStyle.secondary
-        await interaction.response.edit_message(view=self._parent)
-
-
-class _ConfirmAssignButton(discord.ui.Button):
-    def __init__(self, region: str, parent: PlayerAssignView, row: int):
-        super().__init__(label=f"Confirmer {region}", style=discord.ButtonStyle.green, row=row)
-        self._parent = parent
-
-    async def callback(self, interaction: discord.Interaction):
-        await self._parent.confirm(interaction)
-
-
-class _BackButton(discord.ui.Button):
-    def __init__(self, parent: PlayerAssignView, row: int):
-        super().__init__(label="← Retour", style=discord.ButtonStyle.red, row=row)
-        self._parent = parent
-
-    async def callback(self, interaction: discord.Interaction):
-        await self._parent.go_back(interaction)
-
-
-class _PageButton(discord.ui.Button):
-    def __init__(self, label: str, page: int, parent: PlayerAssignView, row: int):
-        super().__init__(label=label, style=discord.ButtonStyle.secondary, row=row)
+class _RegionPageButton(discord.ui.Button):
+    def __init__(self, label: str, page: int, parent: RegionManageView):
+        super().__init__(label=label, style=discord.ButtonStyle.secondary, row=1)
         self._page = page
         self._parent = parent
 
     async def callback(self, interaction: discord.Interaction):
-        new_view = PlayerAssignView(
+        new_view = RegionManageView(
             self._parent.db,
             self._parent.all_players,
-            self._parent.region,
             self._parent.requester_id,
             page=self._page,
         )
-        new_view.selected_player_ids = self._parent.selected_player_ids
-        await interaction.response.edit_message(view=new_view)
+        new_view.selected_player_id = self._parent.selected_player_id
+        total = len(self._parent.all_players)
+        await interaction.response.edit_message(
+            content=(
+                f"**Gestion des régions** — {total} joueur(s)\n"
+                f"Page {self._page + 1} · sélectionnez un joueur puis BZ ou PN."
+            ),
+            view=new_view,
+        )
 
 
+class RankManageView(discord.ui.View):
+    """Attribution de rang en lot — multi-sélection."""
+
+    def __init__(
+        self,
+        db: Database,
+        players: list[dict],
+        tier: str,
+        requester_id: int,
+        *,
+        page: int = 0,
+        filter_tier: str | None = None,
+    ):
+        super().__init__(timeout=180)
+        self.db = db
+        self.tier = tier
+        self.requester_id = requester_id
+        self.all_players = players
+        self.page = page
+        self.filter_tier = filter_tier
+        self.selected_ids: set[int] = set()
+        self._build_items()
+
+    def _page_players(self) -> list[dict]:
+        start = self.page * 25
+        return self.all_players[start : start + 25]
+
+    def _build_items(self) -> None:
+        chunk = self._page_players()
+        if chunk:
+            self.add_item(_RankPlayerMultiSelect(chunk, self))
+        total_pages = max(1, (len(self.all_players) + 24) // 25)
+        if self.page > 0:
+            self.add_item(_RankPageButton("◀ Précédent", self.page - 1, self))
+        if self.page + 1 < total_pages:
+            self.add_item(_RankPageButton("Suivant ▶", self.page + 1, self))
+        self.add_item(_RankApplyButton(self))
+        self.add_item(_RankSelectAllPageButton(self))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.requester_id:
+            await interaction.response.send_message(
+                "Cette action ne vous concerne pas.", ephemeral=True
+            )
+            return False
+        return True
+
+    async def apply_rank(self, interaction: discord.Interaction) -> None:
+        if not self.selected_ids:
+            await interaction.response.send_message(
+                "Sélectionnez au moins un joueur.", ephemeral=True
+            )
+            return
+        count = self.db.set_players_rank_bulk(
+            list(self.selected_ids), self.tier, manual=True
+        )
+        names = []
+        for pid in list(self.selected_ids)[:5]:
+            p = self.db.get_player_by_id(pid)
+            if p:
+                names.append(self.db.player_display_name(p))
+        extra = f" (+{count - 5})" if count > 5 else ""
+        msg = (
+            f"**{count}** joueur(s) → rang `{self.tier}`.\n"
+            f"Ex. : {', '.join(names)}{extra}"
+        )
+        await interaction.response.edit_message(content=msg, view=None)
+        bot = interaction.client
+        if interaction.guild and hasattr(bot, "update_leaderboard_message"):
+            await bot.update_leaderboard_message(interaction.guild)
+
+
+class _RankPlayerMultiSelect(discord.ui.Select):
+    def __init__(self, players: list[dict], parent: RankManageView):
+        self._parent = parent
+        db = parent.db
+        options = []
+        for p in players:
+            name = db.player_display_name(p)
+            cur = (p.get("tier_rank") or "NR").upper()
+            options.append(
+                discord.SelectOption(
+                    label=name[:100],
+                    value=str(p["id"]),
+                    description=f"Rang actuel : {cur}"[:100],
+                )
+            )
+        super().__init__(
+            placeholder=f"Choisir joueur(s) → rang {parent.tier}…",
+            min_values=1,
+            max_values=min(len(options), 25),
+            options=options,
+            row=0,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        self._parent.selected_ids.update(int(v) for v in self.values)
+        await interaction.response.send_message(
+            f"**{len(self.values)}** joueur(s) sélectionné(s) "
+            f"(total : {len(self._parent.selected_ids)}).\n"
+            f"Cliquez **Attribuer {self._parent.tier}** pour confirmer.",
+            ephemeral=True,
+        )
+
+
+class _RankApplyButton(discord.ui.Button):
+    def __init__(self, parent: RankManageView):
+        super().__init__(
+            label=f"Attribuer {parent.tier}",
+            style=discord.ButtonStyle.green,
+            row=2,
+        )
+        self._parent = parent
+
+    async def callback(self, interaction: discord.Interaction):
+        await self._parent.apply_rank(interaction)
+
+
+class _RankSelectAllPageButton(discord.ui.Button):
+    def __init__(self, parent: RankManageView):
+        super().__init__(
+            label="Toute la page",
+            style=discord.ButtonStyle.secondary,
+            row=2,
+        )
+        self._parent = parent
+
+    async def callback(self, interaction: discord.Interaction):
+        for p in self._parent._page_players():
+            self._parent.selected_ids.add(p["id"])
+        await interaction.response.send_message(
+            f"Page sélectionnée — **{len(self._parent.selected_ids)}** joueur(s) au total.\n"
+            f"Cliquez **Attribuer {self._parent.tier}**.",
+            ephemeral=True,
+        )
+
+
+class _RankPageButton(discord.ui.Button):
+    def __init__(self, label: str, page: int, parent: RankManageView):
+        super().__init__(label=label, style=discord.ButtonStyle.secondary, row=1)
+        self._page = page
+        self._parent = parent
+
+    async def callback(self, interaction: discord.Interaction):
+        new_view = RankManageView(
+            self._parent.db,
+            self._parent.all_players,
+            self._parent.tier,
+            self._parent.requester_id,
+            page=self._page,
+            filter_tier=self._parent.filter_tier,
+        )
+        new_view.selected_ids = set(self._parent.selected_ids)
+        filt = self._parent.filter_tier or "tous"
+        await interaction.response.edit_message(
+            content=(
+                f"**Attribution rang `{self._parent.tier}`** — "
+                f"{len(self._parent.all_players)} joueur(s) (filtre : {filt})"
+                f"\nPage {self._page + 1} · multi-sélection puis **Attribuer**."
+            ),
+            view=new_view,
+        )
+
+
+class FusionManageView(discord.ui.View):
+    """Fusionner deux joueurs — garder + supprimer."""
+
+    def __init__(
+        self,
+        db: Database,
+        players: list[dict],
+        requester_id: int,
+        *,
+        page: int = 0,
+    ):
+        super().__init__(timeout=180)
+        self.db = db
+        self.requester_id = requester_id
+        self.all_players = players
+        self.page = page
+        self.keep_id: int | None = None
+        self.drop_id: int | None = None
+        self._build_items()
+
+    def _page_players(self) -> list[dict]:
+        start = self.page * 25
+        return self.all_players[start : start + 25]
+
+    def _build_items(self) -> None:
+        chunk = self._page_players()
+        if chunk:
+            self.add_item(_FusionKeepSelect(chunk, self))
+            self.add_item(_FusionDropSelect(chunk, self))
+        total_pages = max(1, (len(self.all_players) + 24) // 25)
+        if self.page > 0:
+            self.add_item(_FusionPageButton("◀", self.page - 1, self))
+        if self.page + 1 < total_pages:
+            self.add_item(_FusionPageButton("▶", self.page + 1, self))
+        self.add_item(_FusionConfirmButton(self))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.requester_id:
+            await interaction.response.send_message(
+                "Cette action ne vous concerne pas.", ephemeral=True
+            )
+            return False
+        return True
+
+    async def do_merge(self, interaction: discord.Interaction) -> None:
+        if not self.keep_id or not self.drop_id:
+            await interaction.response.send_message(
+                "Sélectionnez le joueur à **garder** et celui à **fusionner**.",
+                ephemeral=True,
+            )
+            return
+        if self.keep_id == self.drop_id:
+            await interaction.response.send_message(
+                "Choisissez deux joueurs différents.", ephemeral=True
+            )
+            return
+        keep = self.db.get_player_by_id(self.keep_id)
+        drop = self.db.get_player_by_id(self.drop_id)
+        if not keep or not drop:
+            await interaction.response.send_message(
+                "Joueur introuvable.", ephemeral=True
+            )
+            return
+        self.db.merge_player_into(self.keep_id, self.drop_id)
+        season = self.db.get_active_season()
+        if season:
+            await interaction.client.loop.run_in_executor(
+                None, self.db.recalculate_season_elo, season["id"]
+            )
+        msg = (
+            f"Fusion OK : **{self.db.player_display_name(drop)}** "
+            f"→ **{self.db.player_display_name(keep)}**"
+        )
+        await interaction.response.edit_message(content=msg, view=None)
+        bot = interaction.client
+        if interaction.guild and hasattr(bot, "update_leaderboard_message"):
+            await bot.update_leaderboard_message(interaction.guild)
+
+
+class _FusionKeepSelect(discord.ui.Select):
+    def __init__(self, players: list[dict], parent: FusionManageView):
+        self._parent = parent
+        db = parent.db
+        options = [
+            discord.SelectOption(
+                label=db.player_display_name(p)[:100],
+                value=str(p["id"]),
+                description="Garder ce profil",
+            )
+            for p in players
+        ]
+        super().__init__(
+            placeholder="Joueur à GARDER…",
+            min_values=1,
+            max_values=1,
+            options=options,
+            row=0,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        self._parent.keep_id = int(self.values[0])
+        p = self._parent.db.get_player_by_id(self._parent.keep_id)
+        name = self._parent.db.player_display_name(p) if p else "?"
+        await interaction.response.send_message(
+            f"Profil conservé : **{name}**", ephemeral=True
+        )
+
+
+class _FusionDropSelect(discord.ui.Select):
+    def __init__(self, players: list[dict], parent: FusionManageView):
+        self._parent = parent
+        db = parent.db
+        options = [
+            discord.SelectOption(
+                label=db.player_display_name(p)[:100],
+                value=str(p["id"]),
+                description="Fusionner dans l'autre",
+            )
+            for p in players
+        ]
+        super().__init__(
+            placeholder="Joueur à FUSIONNER (supprimé)…",
+            min_values=1,
+            max_values=1,
+            options=options,
+            row=1,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        self._parent.drop_id = int(self.values[0])
+        p = self._parent.db.get_player_by_id(self._parent.drop_id)
+        name = self._parent.db.player_display_name(p) if p else "?"
+        await interaction.response.send_message(
+            f"Profil fusionné : **{name}**", ephemeral=True
+        )
+
+
+class _FusionConfirmButton(discord.ui.Button):
+    def __init__(self, parent: FusionManageView):
+        super().__init__(
+            label="Confirmer fusion",
+            style=discord.ButtonStyle.danger,
+            row=3,
+        )
+        self._parent = parent
+
+    async def callback(self, interaction: discord.Interaction):
+        await self._parent.do_merge(interaction)
+
+
+class _FusionPageButton(discord.ui.Button):
+    def __init__(self, label: str, page: int, parent: FusionManageView):
+        super().__init__(label=label, style=discord.ButtonStyle.secondary, row=2)
+        self._page = page
+        self._parent = parent
+
+    async def callback(self, interaction: discord.Interaction):
+        new_view = FusionManageView(
+            self._parent.db,
+            self._parent.all_players,
+            self._parent.requester_id,
+            page=self._page,
+        )
+        new_view.keep_id = self._parent.keep_id
+        new_view.drop_id = self._parent.drop_id
+        await interaction.response.edit_message(
+            content=(
+                f"**Fusion de joueurs** — {len(self._parent.all_players)} joueur(s)\n"
+                f"Page {self._page + 1} · garder + fusionner puis **Confirmer**."
+            ),
+            view=new_view,
+        )

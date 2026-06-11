@@ -80,6 +80,44 @@ def format_live_leaderboard_blocks(db: Database, season_id: int) -> list[str]:
     ]
 
 
+def format_inter_region_leaderboard(db: Database, season_id: int) -> str:
+    season = db.get_season(season_id) or db.get_active_season()
+    stats = db.get_inter_region_stats(season_id)
+    total = stats["total_matches"]
+    if total == 0:
+        return "Aucun match inter-villes (BZ vs PN) enregistré sur cette saison."
+
+    lines = [
+        "**CONFRONTATIONS BZ vs PN**",
+        "",
+    ]
+    if season:
+        lines.append(f"Saison : **{season.get('name', '?')}**")
+    lines.extend([
+        f"Matchs inter-villes : **{total}**",
+        f"**BZ {stats['bz_wins']} — {stats['pn_wins']} PN**",
+        "",
+        "**Top joueurs (matchs inter-villes)**",
+    ])
+
+    bz_players = [p for p in stats["player_stats"] if p["region"] == "BZ"][:10]
+    pn_players = [p for p in stats["player_stats"] if p["region"] == "PN"][:10]
+
+    if bz_players:
+        lines.append("")
+        lines.append("**BZ**")
+        for i, p in enumerate(bz_players, 1):
+            lines.append(f"{i}. {p['name']} — {p['wins']}V / {p['losses']}D vs PN")
+
+    if pn_players:
+        lines.append("")
+        lines.append("**PN**")
+        for i, p in enumerate(pn_players, 1):
+            lines.append(f"{i}. {p['name']} — {p['wins']}V / {p['losses']}D vs BZ")
+
+    return "\n".join(lines)
+
+
 def format_player_stats(stats: dict[str, Any] | None, player_name: str = "") -> str:
     if not stats:
         return f"Aucune statistique pour {player_name or 'ce joueur'}."

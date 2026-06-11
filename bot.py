@@ -234,6 +234,8 @@ class FTBot(commands.Bot):
         message: discord.Message,
         *,
         score_region: str | None = None,
+        ignore_cutoff: bool = False,
+        since=None,
     ) -> bool:
         """Synchronise les matchs d'un message Discord. Retourne True si modifié."""
         if message.author.bot:
@@ -243,7 +245,11 @@ class FTBot(commands.Bot):
         if not season:
             return False
 
-        cutoff = self.db.get_season_score_cutoff(season)
+        if ignore_cutoff:
+            cutoff = since if since is not None else config.START_DATE
+        else:
+            cutoff = self.db.get_season_score_cutoff(season)
+
         msg_date = message.created_at
         if msg_date.tzinfo is None:
             msg_date = msg_date.replace(tzinfo=timezone.utc)
@@ -348,7 +354,12 @@ class FTBot(commands.Bot):
             await self.update_leaderboard_message(guild)
 
     async def sync_score_message(
-        self, message: discord.Message, *, from_history: bool = False
+        self,
+        message: discord.Message,
+        *,
+        from_history: bool = False,
+        ignore_cutoff: bool = False,
+        since=None,
     ) -> bool:
         score_region = self.get_score_region(message)
         if score_region is None:
@@ -359,6 +370,8 @@ class FTBot(commands.Bot):
             self._sync_message_scores_sync,
             message,
             score_region=region_for_db,
+            ignore_cutoff=ignore_cutoff,
+            since=since,
         )
         if changed and not from_history:
             await self._apply_score_changes(message.guild)
@@ -380,15 +393,25 @@ class FTBot(commands.Bot):
         await self._apply_score_changes(guild)
 
     async def sync_guild_scores(
-        self, guild: discord.Guild, *, quiet: bool = False
-    ) -> None:
+        self,
+        guild: discord.Guild,
+        *,
+        quiet: bool = False,
+        ignore_cutoff: bool = False,
+        since=None,
+    ) -> int:
+        """Synchronise les scores. Retourne le nombre de changements."""
         season = self.db.get_active_season()
         if not season:
             if not quiet:
                 logger.info("Aucune saison active — sync scores ignorée")
-            return
+            return 0
 
-        cutoff = self.db.get_season_score_cutoff(season)
+        if ignore_cutoff:
+            cutoff = since if since is not None else config.START_DATE
+        else:
+            cutoff = self.db.get_season_score_cutoff(season)
+
         discord_message_ids: set[int] = set()
         sync_count = 0
 
@@ -431,7 +454,12 @@ class FTBot(commands.Bot):
                             continue
                         discord_message_ids.add(message.id)
                         processed += 1
-                        if await self.sync_score_message(message, from_history=True):
+                        if await self.sync_score_message(
+                            message,
+                            from_history=True,
+                            ignore_cutoff=ignore_cutoff,
+                            since=since,
+                        ):
                             sync_count += 1
                         if processed % 10 == 0:
                             await asyncio.sleep(0.05)
@@ -476,6 +504,22 @@ class FTBot(commands.Bot):
                 self.db.count_season_matches(season["id"]),
                 self.db.count_season_players(season["id"]),
             )
+        return sync_count
+
+    async def recover_scores_from_date(
+        self, guild: discord.Guild, since=None
+    ) -> int:
+        """Réimporte les scores Discord depuis une date (ex. début 2026)."""
+        season = self.db.get_active_season()
+        if season:
+            await asyncio.to_thread(
+                self.db.clear_season_reset_flag, season["id"]
+            )
+        since = since or config.START_DATE
+        logger.info("Récupération scores depuis %s sur %s", since, guild.name)
+        return await self.sync_guild_scores(
+            guild, quiet=False, ignore_cutoff=True, since=since
+        )
 
     async def scan_history(self) -> None:
         """Compatibilité — resync complète."""

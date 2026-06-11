@@ -12,11 +12,18 @@ from player_resolver import (
     resolve_player_input,
 )
 from ranking import format_tier
-from stats import format_comparison, format_leaderboard, format_player_stats
+from stats import (
+    format_comparison,
+    format_inter_region_leaderboard,
+    format_leaderboard,
+    format_player_stats,
+)
 from views import (
     ArchivedSeasonView,
+    FusionManageView,
     PlayerNotFoundView,
-    RegionSelectView,
+    RankManageView,
+    RegionManageView,
     SeasonNewConfirmView,
 )
 
@@ -29,6 +36,9 @@ TIER_CHOICES = [
     for t in config.VALID_TIERS
     if t != "NR"
 ]
+FILTRE_RANG_CHOICES = [
+    app_commands.Choice(name="Tous les joueurs", value="tous"),
+] + [app_commands.Choice(name=f"Rang actuel : {t}", value=t) for t in config.VALID_TIERS]
 
 
 def _split_message(text: str, limit: int = 1990) -> list[str]:
@@ -151,6 +161,7 @@ def build_aide_embed() -> discord.Embed:
             "`/classement` — tous les joueurs (saison active)\n"
             "`/classement-bz` — région BZ\n"
             "`/classement-pn` — région PN\n"
+            "`/classement-bz-pn` — confrontations BZ vs PN\n"
             "`/classement-saison` — ancienne saison archivée"
         ),
         inline=False,
@@ -173,8 +184,10 @@ def build_aide_embed() -> discord.Embed:
     embed.add_field(
         name="Administration",
         value=(
-            "`/set-rang` · `/region` · `/saison-nouvelle` · `/reset-saison`\n"
-            "`/recalculer-points` · `/backup` · `/restore` · `/sante`"
+            "`/set-rang` · `/region` · `/fusion-joueur`\n"
+            "`/export-donnees` · `/telechargement-donnees`\n"
+            "`/recuperation-scores-2026` · `/classement-bz-pn`\n"
+            "`/saison-nouvelle` · `/reset-saison` · `/backup` · `/restore`"
         ),
         inline=False,
     )
@@ -361,18 +374,37 @@ def setup_commands(tree: app_commands.CommandTree, db: Database) -> None:
             format_comparison(res_a.player, res_b.player, matches, db),
         )
 
-    @tree.command(name="set-rang", description="[Admin] Attribuer un rang à un joueur")
-    @app_commands.describe(
-        rang="Rang (S+, S, A+, A, B+, B)",
-        pseudo="Pseudo du joueur",
-        membre="Membre Discord (prioritaire)",
+    @tree.command(
+        name="classement-bz-pn",
+        description="Confrontations entre joueurs BZ et PN (saison active)",
     )
-    @app_commands.choices(rang=TIER_CHOICES)
+    async def classement_bz_pn(interaction: discord.Interaction):
+        season = db.get_active_season()
+        if not season:
+            await send_reply(interaction, "Aucune saison active.", ephemeral=True)
+            return
+        await send_reply(
+            interaction,
+            format_inter_region_leaderboard(db, season["id"]),
+        )
+
+    @tree.command(
+        name="set-rang",
+        description="[Admin] Attribuer un rang (un joueur ou sélection multiple)",
+    )
+    @app_commands.describe(
+        rang="Rang à attribuer (S+, S, A+, A, B+, B)",
+        pseudo="Un seul joueur par pseudo",
+        membre="Un seul membre Discord",
+        filtre="En mode groupe : filtrer par rang actuel",
+    )
+    @app_commands.choices(rang=TIER_CHOICES, filtre=FILTRE_RANG_CHOICES)
     async def set_rang_cmd(
         interaction: discord.Interaction,
         rang: app_commands.Choice[str],
         pseudo: str | None = None,
         membre: discord.Member | None = None,
+        filtre: app_commands.Choice[str] | None = None,
     ):
         if not is_admin(interaction):
             await send_reply(interaction, "Permission refusée.", ephemeral=True)
@@ -380,39 +412,91 @@ def setup_commands(tree: app_commands.CommandTree, db: Database) -> None:
 
         season = db.get_active_season()
         target = membre if membre else pseudo
-        if not target:
-            await send_reply(
-                interaction, "Indiquez un pseudo ou un membre.", ephemeral=True
-            )
-            return
 
-        player, label = _resolve(target, db, season["id"] if season else None)
-        if not player:
-            res = resolve_player_input(db, target, season["id"] if season else None)
-            if res.ambiguous:
+        if target:
+            player, label = _resolve(target, db, season["id"] if season else None)
+            if not player:
+                res = resolve_player_input(
+                    db, target, season["id"] if season else None
+                )
+                if res.ambiguous:
+                    await send_reply(
+                        interaction,
+                        format_ambiguous_players(db, res.candidates),
+                        ephemeral=True,
+                    )
+                    return
                 await send_reply(
-                    interaction,
-                    format_ambiguous_players(db, res.candidates),
-                    ephemeral=True,
+                    interaction, f"Joueur introuvable : **{label}**", ephemeral=True
                 )
                 return
+            pts = db.set_player_rank(player["id"], rang.value, manual=True)
             await send_reply(
-                interaction, f"Joueur introuvable : **{label}**", ephemeral=True
+                interaction,
+                f"**{db.player_display_name(player)}** → rang `{rang.value}` "
+                f"· **{pts}** points",
+                ephemeral=True,
+            )
+            await _refresh_leaderboard(interaction)
+            return
+
+        filter_val = filtre.value if filtre else "tous"
+        if filter_val == "tous":
+            players = db.list_all_players()
+            filter_label = "tous"
+        else:
+            players = db.list_players_by_tier(filter_val)
+            filter_label = filter_val
+
+        if not players:
+            await send_reply(
+                interaction,
+                f"Aucun joueur avec le filtre **{filter_label}**.",
+                ephemeral=True,
             )
             return
 
-        pts = db.set_player_rank(player["id"], rang.value, manual=True)
+        view = RankManageView(
+            db, players, rang.value, interaction.user.id, filter_tier=filter_label
+        )
         await send_reply(
             interaction,
-            f"**{db.player_display_name(player)}** → rang `{rang.value}` "
-            f"· **{pts}** points",
+            f"**Attribution rang `{rang.value}`** — {len(players)} joueur(s)\n"
+            f"Filtre : **{filter_label}**\n"
+            "1. Multi-sélectionnez les joueurs (ou **Toute la page**)\n"
+            f"2. Cliquez **Attribuer {rang.value}**",
             ephemeral=True,
+            view=view,
         )
-        await _refresh_leaderboard(interaction)
+
+    @tree.command(
+        name="fusion-joueur",
+        description="[Admin] Fusionner deux doublons en un seul joueur",
+    )
+    async def fusion_joueur_cmd(interaction: discord.Interaction):
+        if not is_admin(interaction):
+            await send_reply(interaction, "Permission refusée.", ephemeral=True)
+            return
+        players = db.list_all_players()
+        if len(players) < 2:
+            await send_reply(
+                interaction, "Pas assez de joueurs pour une fusion.", ephemeral=True
+            )
+            return
+        view = FusionManageView(db, players, interaction.user.id)
+        await send_reply(
+            interaction,
+            f"**Fusion de joueurs** — {len(players)} joueur(s)\n"
+            "1. **Joueur à GARDER** (profil conservé)\n"
+            "2. **Joueur à FUSIONNER** (supprimé, matchs transférés)\n"
+            "3. **Confirmer fusion**",
+            ephemeral=True,
+            view=view,
+        )
 
     @tree.command(
         name="region",
-        description="[Admin] Assigner des joueurs à une région (BZ ou PN)",
+        description="[Admin] Choisir un joueur et lui assigner BZ, PN ou retirer",
     )
     async def region_cmd(interaction: discord.Interaction):
         if not is_admin(interaction):
@@ -426,10 +510,12 @@ def setup_commands(tree: app_commands.CommandTree, db: Database) -> None:
             )
             return
 
-        view = RegionSelectView(db, interaction.user.id)
+        view = RegionManageView(db, players, interaction.user.id)
         await send_reply(
             interaction,
-            "Choisissez une région (BZ ou PN) :",
+            f"**Gestion des régions** — {len(players)} joueur(s)\n"
+            "1. Choisissez un joueur dans le menu\n"
+            "2. Cliquez **BZ**, **PN** ou **Retirer région**",
             ephemeral=True,
             view=view,
         )
@@ -508,6 +594,111 @@ def setup_commands(tree: app_commands.CommandTree, db: Database) -> None:
         await _refresh_leaderboard(interaction)
         await interaction.followup.send(
             f"Points recalculés pour **{season['name']}**.", ephemeral=True
+        )
+
+    @tree.command(
+        name="export-donnees",
+        description="[Admin] Export Excel + sauvegarde JSON (saison active)",
+    )
+    async def export_donnees_cmd(interaction: discord.Interaction):
+        if not is_admin(interaction):
+            await send_reply(interaction, "Permission refusée.", ephemeral=True)
+            return
+        season = db.get_active_season()
+        if not season:
+            await send_reply(interaction, "Aucune saison active.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+
+        from export_data import build_season_excel
+
+        ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        backup_path = Path(config.BACKUP_DIR) / f"backup_{ts}.json"
+        excel_path = Path(config.BACKUP_DIR) / f"export_{ts}.xlsx"
+
+        await interaction.client.loop.run_in_executor(
+            None, db.export_backup, backup_path
+        )
+        await interaction.client.loop.run_in_executor(
+            None, build_season_excel, db, season["id"], excel_path
+        )
+
+        await interaction.followup.send(
+            f"Sauvegarde JSON : `{backup_path.name}`\n"
+            f"Export Excel saison **{season['name']}** :",
+            ephemeral=True,
+            file=discord.File(excel_path, filename=excel_path.name),
+        )
+
+    @tree.command(
+        name="telechargement-donnees",
+        description="[Admin] Télécharger l'export Excel (nécessite une sauvegarde)",
+    )
+    async def telechargement_donnees_cmd(interaction: discord.Interaction):
+        if not is_admin(interaction):
+            await send_reply(interaction, "Permission refusée.", ephemeral=True)
+            return
+        season = db.get_active_season()
+        if not season:
+            await send_reply(interaction, "Aucune saison active.", ephemeral=True)
+            return
+
+        from export_data import build_season_excel, list_backup_files
+
+        backups = list_backup_files()
+        if not backups:
+            await send_reply(
+                interaction,
+                "Aucune sauvegarde trouvée.\n"
+                "Lancez d'abord `/backup` ou `/export-donnees`.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        excel_path = Path(config.BACKUP_DIR) / f"export_{ts}.xlsx"
+        await interaction.client.loop.run_in_executor(
+            None, build_season_excel, db, season["id"], excel_path
+        )
+        await interaction.followup.send(
+            f"Dernière sauvegarde : `{backups[0].name}`\n"
+            f"Export Excel saison **{season['name']}** :",
+            ephemeral=True,
+            file=discord.File(excel_path, filename=excel_path.name),
+        )
+
+    @tree.command(
+        name="recuperation-scores-2026",
+        description="[Admin] Réimporter les scores Discord depuis le 01/01/2026",
+    )
+    async def recuperation_scores_2026(interaction: discord.Interaction):
+        if not is_admin(interaction):
+            await send_reply(interaction, "Permission refusée.", ephemeral=True)
+            return
+        if not interaction.guild:
+            await send_reply(
+                interaction, "Commande utilisable sur le serveur uniquement.",
+                ephemeral=True,
+            )
+            return
+        season = db.get_active_season()
+        if not season:
+            await send_reply(interaction, "Aucune saison active.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        bot = interaction.client
+        count = await bot.recover_scores_from_date(
+            interaction.guild, since=config.START_DATE
+        )
+        await _refresh_leaderboard(interaction)
+        await interaction.followup.send(
+            f"Récupération terminée depuis le **{config.START_DATE.date()}**.\n"
+            f"**{count}** changement(s) — matchs importés dans la saison "
+            f"**{season['name']}**.\n"
+            "Les scores Discord antérieurs au reset sont de nouveau pris en compte.",
+            ephemeral=True,
         )
 
     @tree.command(

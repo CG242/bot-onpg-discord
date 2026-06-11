@@ -1288,6 +1288,99 @@ class Database:
             cursor.execute("DELETE FROM players WHERE id = %s", (drop_id,))
         logger.info("Fusion joueur %s → %s (%s)", drop_id, keep_id, display)
 
+    def list_players_by_tier(self, tier: str | None = None) -> list[dict[str, Any]]:
+        players = self.list_all_players()
+        if not tier or tier.upper() == "TOUS":
+            return players
+        tier_norm = self._normalize_tier(tier)
+        return [
+            p for p in players
+            if (p.get("tier_rank") or "NR").upper() == tier_norm.upper()
+        ]
+
+    def set_players_rank_bulk(
+        self, player_ids: list[int], tier: str, *, manual: bool = True
+    ) -> int:
+        count = 0
+        for pid in player_ids:
+            self.set_player_rank(pid, tier, manual=manual)
+            count += 1
+        return count
+
+    def clear_season_reset_flag(self, season_id: int) -> None:
+        with self._session() as (_, cursor):
+            cursor.execute(
+                "UPDATE seasons SET data_reset_at = NULL WHERE id = %s",
+                (season_id,),
+            )
+
+    def list_season_matches_detailed(self, season_id: int) -> list[dict[str, Any]]:
+        with self._session(dictionary=True) as (_, cursor):
+            cursor.execute(
+                """
+                SELECT m.*,
+                       p1.name AS player1_name,
+                       p1.region AS player1_region,
+                       p2.name AS player2_name,
+                       p2.region AS player2_region,
+                       w.name AS winner_name
+                FROM matches m
+                JOIN players p1 ON p1.id = m.player1_id
+                JOIN players p2 ON p2.id = m.player2_id
+                JOIN players w ON w.id = m.winner_id
+                WHERE m.season_id = %s
+                ORDER BY m.created_at ASC, m.match_index ASC
+                """,
+                (season_id,),
+            )
+            return cursor.fetchall()
+
+    def get_inter_region_stats(self, season_id: int) -> dict[str, Any]:
+        matches = self.list_season_matches_detailed(season_id)
+        inter = [
+            m for m in matches
+            if m.get("player1_region") in config.VALID_REGIONS
+            and m.get("player2_region") in config.VALID_REGIONS
+            and m.get("player1_region") != m.get("player2_region")
+        ]
+        bz_wins = sum(
+            1 for m in inter
+            if (
+                (m["player1_region"] == "BZ" and m["winner_id"] == m["player1_id"])
+                or (m["player2_region"] == "BZ" and m["winner_id"] == m["player2_id"])
+            )
+        )
+        pn_wins = len(inter) - bz_wins
+
+        player_stats: dict[int, dict[str, Any]] = {}
+        for m in inter:
+            for pid, pname, preg in (
+                (m["player1_id"], m["player1_name"], m["player1_region"]),
+                (m["player2_id"], m["player2_name"], m["player2_region"]),
+            ):
+                if pid not in player_stats:
+                    player_stats[pid] = {
+                        "name": pname,
+                        "region": (preg or "—").upper(),
+                        "wins": 0,
+                        "losses": 0,
+                    }
+                if m["winner_id"] == pid:
+                    player_stats[pid]["wins"] += 1
+                else:
+                    player_stats[pid]["losses"] += 1
+
+        ranked = sorted(
+            player_stats.values(),
+            key=lambda r: (-r["wins"], r["losses"], r["name"]),
+        )
+        return {
+            "total_matches": len(inter),
+            "bz_wins": bz_wins,
+            "pn_wins": pn_wins,
+            "player_stats": ranked,
+        }
+
     def deduplicate_all_players(self) -> int:
         from player_identity import similarity
 
