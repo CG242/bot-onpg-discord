@@ -116,73 +116,87 @@ def _resolve(joueur, db: Database, season_id: int | None):
 
 def build_aide_embed() -> discord.Embed:
     embed = discord.Embed(
-        title="FT Championship — Guide",
+        title="FT Championship — Guide complet",
         description=(
-            "Le bot lit les scores dans le salon **#scores**, calcule les points "
-            "avec un **ELO compétitif** et met à jour les classements **automatiquement**."
+            "Le bot lit les scores dans **#scores**, calcule l'**ELO compétitif** "
+            "et met à jour les classements **automatiquement** (sync toutes les 3 min)."
         ),
         color=0x2B2D31,
     )
     embed.add_field(
-        name="Enregistrer un score",
+        name="📝 Enregistrer un score",
         value=(
             "Postez dans le salon scores :\n"
-            "```\n"
-            "Leleo242 5 - 1 David MK\n"
-            "Saint-sir 3 - 0 Le David_Mk\n"
-            "JoueurA 5 - 2 JoueurB\n"
-            "```\n"
-            "Plusieurs lignes = plusieurs matchs. Formats FT : 2, 3, 5, 7, 10."
+            "```\nLeleo242 5 - 1 David MK\nSaint-sir 3 - 0 Le David_Mk```\n"
+            "Formats FT : 2, 3, 5, 7, 10. Variantes de pseudo reconnues auto."
         ),
         inline=False,
     )
     embed.add_field(
-        name="Consulter ses statistiques",
+        name="👤 Commandes joueurs",
         value=(
-            "`/stats pseudo:Leleo242`\n"
-            "`/stats pseudo:David MK`\n"
-            "Les variantes de pseudo sont reconnues automatiquement."
-        ),
-        inline=False,
-    )
-    embed.add_field(
-        name="Classements",
-        value=(
-            "`/classement` — tous les joueurs (saison active)\n"
-            "`/classement-bz` — région BZ\n"
-            "`/classement-pn` — région PN\n"
+            "`/stats` — fiche joueur (saison active)\n"
+            "`/compare` — duel entre 2 joueurs\n"
+            "`/classement` — classement général\n"
+            "`/classement-bz` — classement BZ\n"
+            "`/classement-pn` — classement PN\n"
             "`/classement-bz-pn` — confrontations BZ vs PN\n"
-            "`/classement-saison` — ancienne saison archivée"
+            "`/classement-saison` — archive d'une ancienne saison\n"
+            "`/aide` — ce guide"
         ),
         inline=False,
     )
     embed.add_field(
-        name="Comparer deux joueurs",
-        value="`/compare joueur_a:Leleo242 joueur_b:David MK`",
-        inline=False,
-    )
-    embed.add_field(
-        name="Système de points",
+        name="🏆 Système de points",
         value=(
-            "Rangs : `S+` 2400 · `S` 2200 · `A+` 2000 · `A` 1800 · "
+            "`S+` 2400 · `S` 2200 · `A+` 2000 · `A` 1800 · "
             "`B+` 1600 · `B` 1400 · `NR` 1000\n"
-            "Battre un adversaire plus fort = gros gain.\n"
-            "Perdre contre un faible = grosse perte."
+            "Battre un fort = gros gain · Perdre vs faible = grosse perte."
         ),
         inline=False,
     )
     embed.add_field(
-        name="Administration",
+        name="⚙️ Admin — joueurs",
         value=(
-            "`/rang-attribuer` · `/region` · `/fusion-joueur`\n"
-            "`/export-donnees` · `/telechargement-donnees`\n"
-            "`/recuperation-scores-2026` · `/classement-bz-pn`\n"
-            "`/saison-nouvelle` · `/reset-saison` · `/backup` · `/restore`"
+            "`/rang-attribuer` — choisir rang puis joueurs (multi)\n"
+            "`/region` — assigner BZ / PN / retirer\n"
+            "`/fusion-joueur` — fusionner 2 doublons (garde le nom choisi)"
         ),
         inline=False,
     )
-    embed.set_footer(text="Stats et compare : saison active uniquement.")
+    embed.add_field(
+        name="⚙️ Admin — saisons & données",
+        value=(
+            "`/saison-nouvelle` — archiver + nouvelle saison\n"
+            "`/reset-saison` — effacer matchs (garde joueurs)\n"
+            "`/recalculer-points` — recalcul ELO\n"
+            "`/recuperation-scores-2026` — réimporter scores Discord 2026\n"
+            "`/backup` — sauvegarde JSON\n"
+            "`/restore` — avec ou sans sauvegarde\n"
+            "`/export-donnees` — Excel + backup JSON\n"
+            "`/telechargement-donnees` — Excel (si backup existe)\n"
+            "`/sante` — état du bot"
+        ),
+        inline=False,
+    )
+    embed.set_footer(
+        text="Stats/compare = saison active · Recherche partielle : leo, mk, david…"
+    )
     return embed
+
+
+async def _backup_file_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[app_commands.Choice[str]]:
+    from export_data import list_backup_files
+
+    choices = []
+    for path in list_backup_files()[:25]:
+        name = path.name
+        if current and current.lower() not in name.lower():
+            continue
+        choices.append(app_commands.Choice(name=name, value=name))
+    return choices
 
 
 def setup_commands(tree: app_commands.CommandTree, db: Database) -> None:
@@ -387,7 +401,7 @@ def setup_commands(tree: app_commands.CommandTree, db: Database) -> None:
             await send_reply(interaction, "Permission refusée.", ephemeral=True)
             return
 
-        players = db.list_all_players()
+        players = db.list_players_for_menus()
         if not players:
             await send_reply(
                 interaction, "Aucun joueur enregistré.", ephemeral=True
@@ -412,7 +426,7 @@ def setup_commands(tree: app_commands.CommandTree, db: Database) -> None:
         if not is_admin(interaction):
             await send_reply(interaction, "Permission refusée.", ephemeral=True)
             return
-        players = db.list_all_players()
+        players = db.list_players_for_menus()
         if len(players) < 2:
             await send_reply(
                 interaction, "Pas assez de joueurs pour une fusion.", ephemeral=True
@@ -439,7 +453,7 @@ def setup_commands(tree: app_commands.CommandTree, db: Database) -> None:
             await send_reply(interaction, "Permission refusée.", ephemeral=True)
             return
 
-        players = db.list_all_players()
+        players = db.list_players_for_menus()
         if not players:
             await send_reply(
                 interaction, "Aucun joueur enregistré.", ephemeral=True
@@ -657,42 +671,71 @@ def setup_commands(tree: app_commands.CommandTree, db: Database) -> None:
             ephemeral=True,
         )
 
+    RESTORE_MODE_CHOICES = [
+        app_commands.Choice(
+            name="Restaurer depuis une sauvegarde",
+            value="sauvegarde",
+        ),
+        app_commands.Choice(
+            name="Repartir à zéro (sans sauvegarde)",
+            value="zero",
+        ),
+    ]
+
     @tree.command(
         name="restore",
-        description="[Admin] Vider la base et repartir à zéro (ou restaurer une sauvegarde)",
+        description="[Admin] Restaurer une sauvegarde ou repartir à zéro",
     )
     @app_commands.describe(
-        fichier="Nom du fichier backup (optionnel). Sans fichier = tout effacer.",
+        mode="Avec sauvegarde ou sans sauvegarde",
+        fichier="Fichier backup (obligatoire si mode sauvegarde)",
     )
+    @app_commands.choices(mode=RESTORE_MODE_CHOICES)
+    @app_commands.autocomplete(fichier=_backup_file_autocomplete)
     async def restore_cmd(
-        interaction: discord.Interaction, fichier: str | None = None
+        interaction: discord.Interaction,
+        mode: app_commands.Choice[str],
+        fichier: str | None = None,
     ):
         if not is_admin(interaction):
             await send_reply(interaction, "Permission refusée.", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)
 
-        if fichier:
+        if mode.value == "sauvegarde":
+            if not fichier:
+                await interaction.followup.send(
+                    "Indiquez le **fichier** de sauvegarde "
+                    "(ex. `backup_20260101_120000.json`).\n"
+                    "Utilisez `/backup` pour en créer une.",
+                    ephemeral=True,
+                )
+                return
             path = Path(config.BACKUP_DIR) / fichier
             if not path.exists():
                 await interaction.followup.send(
-                    f"Fichier introuvable : `{fichier}`", ephemeral=True
+                    f"Fichier introuvable : `{fichier}`\n"
+                    f"Dossier : `{config.BACKUP_DIR}/`",
+                    ephemeral=True,
                 )
                 return
             await interaction.client.loop.run_in_executor(
                 None, db.restore_backup, path
             )
             msg = (
-                f"Base vidée puis restaurée depuis `{fichier}`.\n"
-                "Toutes les tables ont été remplacées par la sauvegarde."
+                f"✅ **Restauration terminée** depuis `{fichier}`.\n"
+                "Toutes les tables ont été vidées puis rechargées.\n"
+                "Joueurs, matchs et saisons = contenu de la sauvegarde."
             )
         else:
             await interaction.client.loop.run_in_executor(
                 None, db.wipe_all_and_reset
             )
             msg = (
-                "Base **entièrement vidée** et réinitialisée.\n"
-                "Nouvelle saison vierge créée. Aucun joueur, aucun match."
+                "✅ **Reparti à zéro** (sans sauvegarde).\n"
+                "Base entièrement vidée.\n"
+                "Nouvelle saison vierge — aucun joueur, aucun match.\n"
+                "Utilisez `/recuperation-scores-2026` pour réimporter les scores Discord."
             )
 
         await _refresh_leaderboard(interaction)

@@ -1012,6 +1012,35 @@ class Database:
             rows = cursor.fetchall()
         return [r for r in rows if self._is_valid_player(r)]
 
+    def list_players_for_menus(self) -> list[dict[str, Any]]:
+        """Liste fraîche pour menus admin — uniquement les joueurs encore en base."""
+        with self._session(dictionary=True) as (_, cursor):
+            cursor.execute(
+                """
+                SELECT p.*
+                FROM players p
+                WHERE EXISTS (
+                    SELECT 1 FROM players p2 WHERE p2.id = p.id
+                )
+                ORDER BY p.name ASC
+                """
+            )
+            rows = cursor.fetchall()
+        valid = [r for r in rows if self._is_valid_player(r)]
+        seen_keys: dict[str, int] = {}
+        unique: list[dict[str, Any]] = []
+        for p in valid:
+            pid = p["id"]
+            if self.get_player_by_id(pid) is None:
+                continue
+            key = p.get("normalized_name") or normalize_key(p.get("name", ""))
+            if key and key in seen_keys:
+                continue
+            if key:
+                seen_keys[key] = pid
+            unique.append(p)
+        return unique
+
     def list_players_by_region(self, season_id: int, region: str) -> list[dict[str, Any]]:
         return [
             p
@@ -1257,14 +1286,26 @@ class Database:
             row["winner_display"] = row.get("winner_name") or "?"
         return rows
 
-    def merge_player_into(self, keep_id: int, drop_id: int) -> None:
+    def merge_player_into(
+        self,
+        keep_id: int,
+        drop_id: int,
+        *,
+        keep_display_name: str | None = None,
+    ) -> None:
         if keep_id == drop_id:
             return
         keep = self.get_player_by_id(keep_id)
         drop = self.get_player_by_id(drop_id)
         if not keep or not drop:
             return
-        display = pick_display_name(keep.get("name", ""), drop.get("name", ""))
+
+        raw_name = keep_display_name or keep.get("name", "")
+        display = sanitize_player_name(raw_name) or raw_name.strip()[:255]
+        if not display:
+            display = keep.get("name", "Inconnu")
+        normalized = normalize_key(display) or keep.get("normalized_name", "")
+
         with self._session() as (_, cursor):
             for col in ("player1_id", "player2_id", "winner_id"):
                 cursor.execute(
@@ -1282,11 +1323,29 @@ class Database:
                     (drop["region"], keep_id),
                 )
             cursor.execute(
-                "UPDATE players SET name = %s WHERE id = %s",
-                (display, keep_id),
+                """
+                UPDATE players
+                SET name = %s, normalized_name = %s
+                WHERE id = %s
+                """,
+                (display, normalized, keep_id),
             )
             cursor.execute("DELETE FROM players WHERE id = %s", (drop_id,))
-        logger.info("Fusion joueur %s → %s (%s)", drop_id, keep_id, display)
+            deleted = cursor.rowcount
+
+        if deleted == 0:
+            logger.error(
+                "Fusion: suppression échouée pour drop_id=%s", drop_id
+            )
+            raise RuntimeError(f"Impossible de supprimer le joueur {drop_id}")
+
+        self.deduplicate_all_players()
+        logger.info(
+            "Fusion joueur %s → %s (nom conservé: %s)",
+            drop_id,
+            keep_id,
+            display,
+        )
 
     def list_players_by_tier(self, tier: str | None = None) -> list[dict[str, Any]]:
         players = self.list_all_players()

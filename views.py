@@ -709,13 +709,27 @@ class FusionManageView(discord.ui.View):
 
             keep_name = self.db.player_display_name(keep)
             drop_name = self.db.player_display_name(drop)
-            self.db.merge_player_into(self.keep_id, self.drop_id)
+            try:
+                self.db.merge_player_into(
+                    self.keep_id,
+                    self.drop_id,
+                    keep_display_name=keep_name,
+                )
+            except RuntimeError as exc:
+                logger.error("Fusion échouée: %s", exc)
+                await interaction.response.send_message(
+                    f"Fusion impossible : {exc}", ephemeral=True
+                )
+                return
             season = self.db.get_active_season()
             if season:
                 await interaction.client.loop.run_in_executor(
                     None, self.db.recalculate_season_elo, season["id"]
                 )
-            msg = f"Fusion OK : **{drop_name}** → **{keep_name}**"
+            msg = (
+                f"Fusion OK : **{drop_name}** fusionné dans **{keep_name}**.\n"
+                f"Nom conservé : **{keep_name}**"
+            )
             await interaction.response.edit_message(content=msg, view=None)
             logger.info(
                 "Fusion OK: drop=%s (%s) → keep=%s (%s) par user=%s",
