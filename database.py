@@ -1369,6 +1369,11 @@ class Database:
                 """,
                 (display, normalized, keep_id),
             )
+            # Delete deduplication_history records for the source player before deleting the player
+            cursor.execute(
+                "DELETE FROM deduplication_history WHERE source_player_id = %s",
+                (drop_id,),
+            )
             cursor.execute("DELETE FROM players WHERE id = %s", (drop_id,))
             deleted = cursor.rowcount
 
