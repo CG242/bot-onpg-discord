@@ -47,13 +47,19 @@ def is_valid_player_name(name: str) -> bool:
 
 def normalize_key(name: str) -> str:
     """
-    Clé interne unique : accents, espaces, tirets, underscores et « le » retirés.
-    David MK / David_MK / Le David MK → davidmk
+    Clé interne unique : accents, espaces, tirets, underscores et titres retirés.
+    David MK / David_MK / Le David MK / Sir David MK → davidmk
     """
     cleaned = sanitize_player_name(name) if name else str(name or "")
     cleaned = strip_accents(cleaned).lower().strip()
-    if cleaned.startswith("le "):
-        cleaned = cleaned[3:].strip()
+    
+    # Remove common titles/prefixes
+    titles = ["le ", "la ", "les ", "sir ", "mr ", "mrs ", "ms ", "dr ", "prof ", "lord ", "lady "]
+    for title in titles:
+        if cleaned.startswith(title):
+            cleaned = cleaned[len(title):].strip()
+            break
+    
     cleaned = re.sub(r"[\s_\-]+", "", cleaned)
     return cleaned
 
