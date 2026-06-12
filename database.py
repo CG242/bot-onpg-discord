@@ -185,6 +185,24 @@ class Database:
                     )
                     """
                 )
+                cursor.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS deduplication_history (
+                        id INT AUTO_INCREMENT PRIMARY KEY,
+                        source_player_id INT NOT NULL,
+                        target_player_id INT NOT NULL,
+                        source_player_name VARCHAR(255) NOT NULL,
+                        target_player_name VARCHAR(255) NOT NULL,
+                        merged_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        merged_by VARCHAR(255) NULL,
+                        notes TEXT NULL,
+                        FOREIGN KEY (source_player_id) REFERENCES players(id) ON DELETE RESTRICT,
+                        FOREIGN KEY (target_player_id) REFERENCES players(id) ON DELETE RESTRICT,
+                        INDEX idx_merged_at (merged_at),
+                        INDEX idx_source_target (source_player_id, target_player_id)
+                    ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+                    """
+                )
                 self._migrate_schema(cursor)
 
             if self.get_active_season() is None:
