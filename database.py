@@ -1330,6 +1330,15 @@ class Database:
                 """,
                 (display, normalized, keep_id),
             )
+            # Record the alias mapping BEFORE deleting the player (to avoid foreign key constraint)
+            cursor.execute(
+                """
+                INSERT INTO deduplication_history 
+                (source_player_id, target_player_id, source_player_name, target_player_name, merged_by)
+                VALUES (%s, %s, %s, %s, %s)
+                """,
+                (drop_id, keep_id, drop.get("name", ""), keep.get("name", ""), "system")
+            )
             # Delete deduplication_history records for the source player before deleting the player
             cursor.execute(
                 "DELETE FROM deduplication_history WHERE source_player_id = %s",
@@ -1343,9 +1352,6 @@ class Database:
                 "Fusion: suppression échouée pour drop_id=%s", drop_id
             )
             raise RuntimeError(f"Impossible de supprimer le joueur {drop_id}")
-
-        # Record the alias mapping BEFORE deleting the player (to avoid foreign key constraint)
-        self.record_player_alias(drop.get("name", ""), keep_id, drop_id)
 
         self.deduplicate_all_players()
         logger.info(
