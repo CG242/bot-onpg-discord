@@ -1375,6 +1375,9 @@ class Database:
             )
             raise RuntimeError(f"Impossible de supprimer le joueur {drop_id}")
 
+        # Record the alias mapping for future automatic resolution
+        self.record_player_alias(drop.get("name", ""), keep_id, drop_id)
+
         self.deduplicate_all_players()
         logger.info(
             "Fusion joueur %s → %s (nom conservé: %s)",
@@ -1382,6 +1385,58 @@ class Database:
             keep_id,
             display,
         )
+
+    def record_player_alias(self, alias_name: str, target_player_id: int, source_player_id: int) -> None:
+        """Record a player alias mapping when a merge happens."""
+        target = self.get_player_by_id(target_player_id)
+        if not target:
+            return
+        
+        with self._session() as (_, cursor):
+            cursor.execute(
+                """
+                INSERT INTO deduplication_history 
+                (source_player_id, target_player_id, source_player_name, target_player_name, merged_by)
+                VALUES (%s, %s, %s, %s, %s)
+                """,
+                (source_player_id, target_player_id, alias_name, target.get("name", ""), "system")
+            )
+        logger.info(
+            "Alias enregistré: '%s' → joueur %s (id=%s)",
+            alias_name,
+            target.get("name", ""),
+            target_player_id,
+        )
+
+    def resolve_player_alias(self, name: str) -> dict[str, Any] | None:
+        """Check if a name was previously merged and return the target player."""
+        normalized = normalize_key(name)
+        
+        with self._session(dictionary=True) as (_, cursor):
+            cursor.execute(
+                """
+                SELECT target_player_id, target_player_name
+                FROM deduplication_history
+                WHERE source_player_name = %s
+                ORDER BY merged_at DESC
+                LIMIT 1
+                """,
+                (name,),
+            )
+            result = cursor.fetchone()
+            
+            if result:
+                target = self.get_player_by_id(result["target_player_id"])
+                if target:
+                    logger.info(
+                        "Alias résolu: '%s' → '%s' (id=%s)",
+                        name,
+                        result["target_player_name"],
+                        result["target_player_id"],
+                    )
+                    return target
+        
+        return None
 
     def list_players_by_tier(self, tier: str | None = None) -> list[dict[str, Any]]:
         players = self.list_all_players()

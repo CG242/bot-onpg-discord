@@ -88,6 +88,28 @@ def resolve_or_create_player(
     clean_name = sanitize_player_name(name) or str(name).strip()[:64]
     key = normalize_key(clean_name)
 
+    # Check if this name was previously merged into another player (alias resolution)
+    alias_target = db.resolve_player_alias(name)
+    if alias_target:
+        logger.info(
+            "Nom '%s' correspond à un alias précédent, utilisation du joueur %s (id=%s)",
+            name,
+            alias_target.get("name", ""),
+            alias_target["id"],
+        )
+        # Update the existing player with the new display name if needed
+        display = pick_display_name(alias_target.get("name", ""), clean_name)
+        updates: dict[str, Any] = {}
+        if display != alias_target.get("name"):
+            updates["name"] = display
+        if discord_id and not alias_target.get("discord_id"):
+            db.link_discord_id(alias_target["id"], discord_id)
+            alias_target["discord_id"] = discord_id
+        if updates:
+            db.update_player_fields(alias_target["id"], **updates)
+            alias_target.update(updates)
+        return alias_target
+
     existing = find_existing_player(db, clean_name, discord_id)
     
     # Handle ambiguous matches (list of candidates)
