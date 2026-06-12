@@ -1342,6 +1342,9 @@ class Database:
                 # Keep the original normalized_name to avoid duplicate
                 normalized = keep.get("normalized_name", "")
 
+        # Record the alias mapping BEFORE deleting the player (to avoid foreign key constraint)
+        self.record_player_alias(drop.get("name", ""), keep_id, drop_id)
+
         with self._session() as (_, cursor):
             for col in ("player1_id", "player2_id", "winner_id"):
                 cursor.execute(
@@ -1374,9 +1377,6 @@ class Database:
                 "Fusion: suppression échouée pour drop_id=%s", drop_id
             )
             raise RuntimeError(f"Impossible de supprimer le joueur {drop_id}")
-
-        # Record the alias mapping for future automatic resolution
-        self.record_player_alias(drop.get("name", ""), keep_id, drop_id)
 
         self.deduplicate_all_players()
         logger.info(
