@@ -1583,7 +1583,9 @@ class Database:
             data["matches"] = cursor.fetchall()
             cursor.execute("SELECT * FROM bot_settings")
             data["bot_settings"] = cursor.fetchall()
-        for table in ("seasons", "players", "matches"):
+            cursor.execute("SELECT * FROM deduplication_history ORDER BY id")
+            data["deduplication_history"] = cursor.fetchall()
+        for table in ("seasons", "players", "matches", "deduplication_history"):
             for row in data[table]:
                 for k, v in list(row.items()):
                     if isinstance(v, (date, datetime)):
@@ -1599,6 +1601,7 @@ class Database:
             cursor.execute("TRUNCATE TABLE players")
             cursor.execute("TRUNCATE TABLE seasons")
             cursor.execute("TRUNCATE TABLE bot_settings")
+            cursor.execute("TRUNCATE TABLE deduplication_history")
             cursor.execute("SET FOREIGN_KEY_CHECKS = 1")
             for season in raw.get("seasons", []):
                 cursor.execute(
@@ -1666,6 +1669,24 @@ class Database:
                     VALUES (%s, %s)
                     """,
                     (setting["setting_key"], setting["setting_value"]),
+                )
+            for alias in raw.get("deduplication_history", []):
+                cursor.execute(
+                    """
+                    INSERT INTO deduplication_history
+                    (id, source_player_id, target_player_id, source_player_name, target_player_name, merged_at, merged_by, notes)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        alias["id"],
+                        alias["source_player_id"],
+                        alias["target_player_id"],
+                        alias["source_player_name"],
+                        alias["target_player_name"],
+                        alias.get("merged_at"),
+                        alias.get("merged_by"),
+                        alias.get("notes"),
+                    ),
                 )
 
     def wipe_all_and_reset(self) -> None:
