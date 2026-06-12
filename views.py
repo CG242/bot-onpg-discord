@@ -404,7 +404,7 @@ class RankTierPickView(discord.ui.View):
     """Étape 1 : choisir le rang à attribuer."""
 
     def __init__(self, db: Database, players: list[dict], requester_id: int):
-        super().__init__(timeout=180)
+        super().__init__(timeout=1800)
         self.db = db
         self.all_players = players
         self.requester_id = requester_id
@@ -469,7 +469,7 @@ class RankAssignView(discord.ui.View):
         *,
         page: int = 0,
     ):
-        super().__init__(timeout=180)
+        super().__init__(timeout=1800)
         self.db = db
         self.tier = tier
         self.requester_id = requester_id
@@ -666,7 +666,7 @@ class FusionManageView(discord.ui.View):
         keep_id: int | None = None,
         drop_id: int | None = None,
     ):
-        super().__init__(timeout=180)
+        super().__init__(timeout=1800)
         self.db = db
         self.requester_id = requester_id
         self.all_players = players
