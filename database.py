@@ -667,25 +667,6 @@ class Database:
         updates = {k: v for k, v in fields.items() if k in allowed}
         if not updates:
             return
-        
-        # Check if normalized_name would cause a duplicate
-        if "normalized_name" in updates:
-            with self._session(dictionary=True) as (_, cursor):
-                cursor.execute(
-                    "SELECT id FROM players WHERE normalized_name = %s AND id != %s",
-                    (updates["normalized_name"], player_id),
-                )
-                if cursor.fetchone():
-                    logger.warning(
-                        "Cannot update normalized_name to %s for player %s: already exists",
-                        updates["normalized_name"],
-                        player_id,
-                    )
-                    del updates["normalized_name"]
-        
-        if not updates:
-            return
-            
         cols = ", ".join(f"{k} = %s" for k in updates)
         with self._session() as (_, cursor):
             cursor.execute(
@@ -1325,26 +1306,6 @@ class Database:
             display = keep.get("name", "Inconnu")
         normalized = normalize_key(display) or keep.get("normalized_name", "")
 
-        # Check if normalized_name would cause a duplicate with another player
-        with self._session(dictionary=True) as (_, cursor):
-            cursor.execute(
-                "SELECT id FROM players WHERE normalized_name = %s AND id != %s AND id != %s",
-                (normalized, keep_id, drop_id),
-            )
-            conflict = cursor.fetchone()
-            if conflict:
-                logger.warning(
-                    "Cannot set normalized_name to %s for player %s: conflicts with player %s",
-                    normalized,
-                    keep_id,
-                    conflict["id"],
-                )
-                # Keep the original normalized_name to avoid duplicate
-                normalized = keep.get("normalized_name", "")
-
-        # Record the alias mapping BEFORE deleting the player (to avoid foreign key constraint)
-        self.record_player_alias(drop.get("name", ""), keep_id, drop_id)
-
         with self._session() as (_, cursor):
             for col in ("player1_id", "player2_id", "winner_id"):
                 cursor.execute(
@@ -1382,6 +1343,9 @@ class Database:
                 "Fusion: suppression échouée pour drop_id=%s", drop_id
             )
             raise RuntimeError(f"Impossible de supprimer le joueur {drop_id}")
+
+        # Record the alias mapping BEFORE deleting the player (to avoid foreign key constraint)
+        self.record_player_alias(drop.get("name", ""), keep_id, drop_id)
 
         self.deduplicate_all_players()
         logger.info(

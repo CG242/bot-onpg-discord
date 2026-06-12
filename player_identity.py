@@ -17,9 +17,8 @@ def similarity(a: str, b: str) -> float:
     return SequenceMatcher(None, a, b).ratio()
 
 
-def find_existing_player(db, name: str, discord_id: int | None = None) -> dict[str, Any] | list[dict[str, Any]] | None:
-    """Priorité : Discord ID → clé exacte → similarité textuelle.
-    Retourne un joueur unique, une liste de candidats si ambigü, ou None."""
+def find_existing_player(db, name: str, discord_id: int | None = None) -> dict[str, Any] | None:
+    """Priorité : Discord ID → clé exacte → similarité textuelle."""
     if discord_id:
         by_discord = db.get_player_by_discord_id(discord_id)
         if by_discord:
@@ -34,7 +33,7 @@ def find_existing_player(db, name: str, discord_id: int | None = None) -> dict[s
         return exact
 
     candidates = db.list_all_players()
-    scored_candidates: list[tuple[float, dict[str, Any]]] = []
+    best: dict[str, Any] | None = None
     best_score = 0.0
 
     for player in candidates:
@@ -42,30 +41,14 @@ def find_existing_player(db, name: str, discord_id: int | None = None) -> dict[s
             player.get("name", "")
         )
         score = similarity(key, player_key)
-        if score > 0:
-            scored_candidates.append((score, player))
         if score > best_score:
             best_score = score
+            best = player
 
-    # Sort by score descending
-    scored_candidates.sort(key=lambda x: x[0], reverse=True)
-
-    # If there's a clear best match (significantly higher score), return it
-    if scored_candidates:
-        best = scored_candidates[0]
-        if best[0] >= config.SIMILARITY_THRESHOLD:
-            # Check if there are other candidates with similar scores (ambiguous)
-            similar_candidates = [
-                c for s, c in scored_candidates 
-                if s >= config.SIMILARITY_THRESHOLD and abs(s - best[0]) < 0.1
-            ]
-            if len(similar_candidates) > 1:
-                # Return list for disambiguation
-                return similar_candidates
-            return best[1]
+    if best and best_score >= config.SIMILARITY_THRESHOLD:
+        return best
 
     if len(key) >= 4:
-        substring_matches = []
         for player in candidates:
             player_key = player.get("normalized_name") or ""
             if key in player_key or player_key in key:
@@ -73,11 +56,7 @@ def find_existing_player(db, name: str, discord_id: int | None = None) -> dict[s
                     len(key), len(player_key)
                 )
                 if sub_score >= 0.75:
-                    substring_matches.append(player)
-        if len(substring_matches) == 1:
-            return substring_matches[0]
-        elif len(substring_matches) > 1:
-            return substring_matches
+                    return player
 
     return None
 
@@ -111,19 +90,6 @@ def resolve_or_create_player(
         return alias_target
 
     existing = find_existing_player(db, clean_name, discord_id)
-    
-    # Handle ambiguous matches (list of candidates)
-    if isinstance(existing, list):
-        # If there are multiple candidates, we need user disambiguation
-        # For now, pick the first one but log a warning
-        # In a future enhancement, this should return the list for UI disambiguation
-        logger.warning(
-            "Ambiguous player match for '%s': %d candidates. Using first match.",
-            clean_name,
-            len(existing),
-        )
-        existing = existing[0]
-    
     if existing:
         display = pick_display_name(existing.get("name", ""), clean_name)
         updates: dict[str, Any] = {}

@@ -319,7 +319,14 @@ class _RegionActionButton(discord.ui.Button):
         self._parent = parent
 
     async def callback(self, interaction: discord.Interaction):
-        await self._parent.apply_region(interaction, self._region)
+        parent = _get_parent_view(self, interaction, RegionManageView)
+        if parent is None:
+            await interaction.response.send_message(
+                _view_expired_message("region"),
+                ephemeral=True,
+            )
+            return
+        await parent.apply_region(interaction, self._region)
 
 
 class _RegionPlayerPickSelect(discord.ui.Select):
@@ -346,8 +353,15 @@ class _RegionPlayerPickSelect(discord.ui.Select):
         )
 
     async def callback(self, interaction: discord.Interaction):
-        self._parent.selected_player_ids = [int(v) for v in self.values]
-        count = len(self._parent.selected_player_ids)
+        parent = _get_parent_view(self, interaction, RegionManageView)
+        if parent is None:
+            await interaction.response.send_message(
+                _view_expired_message("region"),
+                ephemeral=True,
+            )
+            return
+        parent.selected_player_ids = [int(v) for v in self.values]
+        count = len(parent.selected_player_ids)
         await interaction.response.send_message(
             f"**{count} joueur(s)** sélectionné(s).\n"
             "Cliquez **BZ**, **PN** ou **Retirer région**.",
@@ -362,14 +376,21 @@ class _RegionPageButton(discord.ui.Button):
         self._parent = parent
 
     async def callback(self, interaction: discord.Interaction):
+        parent = _get_parent_view(self, interaction, RegionManageView)
+        if parent is None:
+            await interaction.response.send_message(
+                _view_expired_message("region"),
+                ephemeral=True,
+            )
+            return
         new_view = RegionManageView(
-            self._parent.db,
-            self._parent.all_players,
-            self._parent.requester_id,
+            parent.db,
+            parent.all_players,
+            parent.requester_id,
             page=self._page,
         )
-        new_view.selected_player_ids = self._parent.selected_player_ids
-        total = len(self._parent.all_players)
+        new_view.selected_player_ids = parent.selected_player_ids
+        total = len(parent.all_players)
         await interaction.response.edit_message(
             content=(
                 f"**Gestion des régions** — {total} joueur(s)\n"
