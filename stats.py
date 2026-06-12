@@ -3,7 +3,7 @@ from typing import Any
 
 import config
 from database import Database
-from ranking import format_tier, win_ratio
+from ranking import format_tier, rank_from_elo, win_ratio
 
 FT_LABELS = (2, 3, 5, 7, 10)
 
@@ -33,7 +33,9 @@ def _leaderboard_table(rows: list[dict], *, show_region: bool = True) -> str:
     lines = []
     for pos, row in enumerate(rows, start=1):
         name = row.get("display_name") or "?"
-        lines.append(f"**{pos}.** {name}")
+        elo = int(row.get("elo") or 0)
+        rank = rank_from_elo(elo)
+        lines.append(f"**{pos}.** {name} ({rank})")
     return "\n".join(lines)
 
 
@@ -123,9 +125,9 @@ def format_player_stats(stats: dict[str, Any] | None, player_name: str = "") -> 
         return f"Aucune statistique pour {player_name or 'ce joueur'}."
 
     name = stats.get("display_name") or stats.get("name") or player_name
-    tier = format_tier(stats.get("tier_rank"))
+    elo = int(stats.get("elo") or 0)
+    tier = rank_from_elo(elo)
     reg = _region_label(stats.get("region"))
-    points = int(stats.get("elo") or 0)
     wins = int(stats["ft_wins"] or 0)
     losses = int(stats["ft_losses"] or 0)
     ratio = win_ratio(wins, losses)
@@ -136,7 +138,7 @@ def format_player_stats(stats: dict[str, Any] | None, player_name: str = "") -> 
         "",
         f"Rang : `{tier}`",
         f"Région : {reg}",
-        f"Points : {points}",
+        f"Points : {elo}",
         "",
         "**TOTAL**",
         f"FT gagnés : {wins}",

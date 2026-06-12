@@ -91,3 +91,21 @@ def base_elo_for_player(tier_rank: str | None, rank_manual: bool) -> int:
     if rank_manual:
         return elo_for_tier(tier)
     return 1000 if tier == "NR" else elo_for_tier(tier)
+
+
+def rank_from_elo(elo: int) -> str:
+    """Calculate rank based on ELO score."""
+    if elo >= 2400:
+        return "S+"
+    elif elo >= 2200:
+        return "S"
+    elif elo >= 2000:
+        return "A+"
+    elif elo >= 1800:
+        return "A"
+    elif elo >= 1600:
+        return "B+"
+    elif elo >= 1400:
+        return "B"
+    else:
+        return "NR"
