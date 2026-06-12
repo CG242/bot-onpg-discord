@@ -236,8 +236,12 @@ class RegionManageView(discord.ui.View):
         self.requester_id = requester_id
         self.all_players = players
         self.page = page
-        self.selected_player_id: int | None = None
+        self.selected_player_ids: list[int] = []
         self._build_items()
+
+    async def _run_checks(self, interaction: discord.Interaction) -> bool:
+        """Compatibility method for older Discord.py versions."""
+        return True
 
     def _page_players(self) -> list[dict]:
         start = self.page * 25
@@ -267,24 +271,36 @@ class RegionManageView(discord.ui.View):
     async def apply_region(
         self, interaction: discord.Interaction, region: str | None
     ) -> None:
-        if not self.selected_player_id:
+        if not self.selected_player_ids:
             await interaction.response.send_message(
-                "Sélectionnez d'abord un joueur dans le menu.", ephemeral=True
+                "Sélectionnez d'abord un ou plusieurs joueurs dans le menu.", ephemeral=True
             )
             return
-        player = self.db.get_player_by_id(self.selected_player_id)
-        if not player:
+        count = 0
+        names = []
+        for player_id in self.selected_player_ids:
+            player = self.db.get_player_by_id(player_id)
+            if player:
+                name = self.db.player_display_name(player)
+                names.append(name)
+                if region:
+                    self.db.set_player_region(player_id, region)
+                else:
+                    self.db.clear_player_region(player_id)
+                count += 1
+        if count == 0:
             await interaction.response.send_message(
-                "Joueur introuvable.", ephemeral=True
+                "Aucun joueur trouvé.", ephemeral=True
             )
             return
-        name = self.db.player_display_name(player)
         if region:
-            self.db.set_player_region(self.selected_player_id, region)
-            msg = f"**{name}** → région **{region}**."
+            msg = f"**{count} joueur(s)** → région **{region}**.\n" + ", ".join(names[:10])
+            if len(names) > 10:
+                msg += f"... et {len(names) - 10} autre(s)."
         else:
-            self.db.clear_player_region(self.selected_player_id)
-            msg = f"Région retirée pour **{name}**."
+            msg = f"Région retirée pour **{count} joueur(s)**.\n" + ", ".join(names[:10])
+            if len(names) > 10:
+                msg += f"... et {len(names) - 10} autre(s)."
         await interaction.response.edit_message(content=msg, view=None)
         bot = interaction.client
         if interaction.guild and hasattr(bot, "update_leaderboard_message"):
@@ -303,14 +319,7 @@ class _RegionActionButton(discord.ui.Button):
         self._parent = parent
 
     async def callback(self, interaction: discord.Interaction):
-        parent = _get_parent_view(self, interaction, RegionManageView)
-        if parent is None:
-            await interaction.response.send_message(
-                _view_expired_message("region"),
-                ephemeral=True,
-            )
-            return
-        await parent.apply_region(interaction, self._region)
+        await self._parent.apply_region(interaction, self._region)
 
 
 class _RegionPlayerPickSelect(discord.ui.Select):
@@ -329,27 +338,18 @@ class _RegionPlayerPickSelect(discord.ui.Select):
                 )
             )
         super().__init__(
-            placeholder="Choisir un joueur…",
+            placeholder="Choisir un ou plusieurs joueurs…",
             min_values=1,
-            max_values=1,
+            max_values=25,
             options=options,
             row=0,
         )
 
     async def callback(self, interaction: discord.Interaction):
-        parent = _get_parent_view(self, interaction, RegionManageView)
-        if parent is None:
-            await interaction.response.send_message(
-                _view_expired_message("region"),
-                ephemeral=True,
-            )
-            return
-        parent.selected_player_id = int(self.values[0])
-        player = parent.db.get_player_by_id(parent.selected_player_id)
-        name = parent.db.player_display_name(player) if player else "?"
-        reg = (player.get("region") or "aucune").upper() if player else "—"
+        self._parent.selected_player_ids = [int(v) for v in self.values]
+        count = len(self._parent.selected_player_ids)
         await interaction.response.send_message(
-            f"**{name}** sélectionné (région : {reg}).\n"
+            f"**{count} joueur(s)** sélectionné(s).\n"
             "Cliquez **BZ**, **PN** ou **Retirer région**.",
             ephemeral=True,
         )
@@ -362,25 +362,18 @@ class _RegionPageButton(discord.ui.Button):
         self._parent = parent
 
     async def callback(self, interaction: discord.Interaction):
-        parent = _get_parent_view(self, interaction, RegionManageView)
-        if parent is None:
-            await interaction.response.send_message(
-                _view_expired_message("region"),
-                ephemeral=True,
-            )
-            return
         new_view = RegionManageView(
-            parent.db,
-            parent.all_players,
-            parent.requester_id,
+            self._parent.db,
+            self._parent.all_players,
+            self._parent.requester_id,
             page=self._page,
         )
-        new_view.selected_player_id = parent.selected_player_id
-        total = len(parent.all_players)
+        new_view.selected_player_ids = self._parent.selected_player_ids
+        total = len(self._parent.all_players)
         await interaction.response.edit_message(
             content=(
                 f"**Gestion des régions** — {total} joueur(s)\n"
-                f"Page {self._page + 1} · sélectionnez un joueur puis BZ ou PN."
+                f"Page {self._page + 1} · sélectionnez un ou plusieurs joueurs puis BZ ou PN."
             ),
             view=new_view,
         )
